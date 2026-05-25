@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import wraps
 from socket import gaierror
 from typing import Any, Dict, List, Literal, Optional, Tuple
+from urllib.parse import urljoin
 
 import lazyllm
 import requests
@@ -16,6 +17,15 @@ _MAX_TEXT_LEN = 2000
 _MAX_FETCH_TEXT_LEN = 4000
 _DEFAULT_WEB_SOURCES = ['bocha', 'google', 'bing', 'wikipedia']
 _SUPPORTED_WEB_SOURCES = {'google', 'bing', 'bocha', 'wikipedia'}
+_SCIVERSE_DEFAULT_FIELDS = [
+    'title',
+    'doi',
+    'doc_id',
+    'abstract',
+    'authors',
+    'publication_published_year',
+    'publication_venue_name',
+]
 _DEFAULT_WIKIPEDIA_URLS = {
     'zh': 'https://zh.wikipedia.org',
     'en': 'https://en.wikipedia.org',
@@ -136,6 +146,27 @@ def _search_failure(query: str, source: str, details: Dict[str, Any], *, lang: O
 
 def _classify_search_exception(exc: Exception) -> Dict[str, Any]:
     message = str(exc)
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return {
+            'status': 'network_unreachable',
+            'reason': f'search provider is unreachable: {message}',
+            **_error_details(exc),
+        }
+    if isinstance(exc, requests.exceptions.Timeout):
+        return {
+            'status': 'request_timeout',
+            'reason': f'search request timed out: {message}',
+            **_error_details(exc),
+        }
+    if isinstance(exc, requests.exceptions.HTTPError):
+        response = exc.response
+        status_code = response.status_code if response is not None else None
+        return {
+            'status': 'http_error',
+            'reason': f'search provider returned HTTP error{f" {status_code}" if status_code else ""}: {message}',
+            'http_status': status_code,
+            **_error_details(exc),
+        }
     if isinstance(exc, ConnectError):
         return {
             'status': 'network_unreachable',
@@ -166,6 +197,209 @@ def _classify_search_exception(exc: Exception) -> Dict[str, Any]:
         'status': 'search_error',
         'reason': f'search failed: {message}',
         **_error_details(exc),
+    }
+
+
+def _first_present(payload: Dict[str, Any], keys: Tuple[str, ...], default: Any = '') -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ''):
+            return value
+    return default
+
+
+def _stringify_authors(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        names: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                name = item.strip()
+            elif isinstance(item, dict):
+                name = str(_first_present(item, ('name', 'display_name', 'full_name'), '')).strip()
+            else:
+                name = ''
+            if name:
+                names.append(name)
+        return ', '.join(names)
+    return ''
+
+
+def _extract_sciverse_hits(payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Optional[int]]:
+    containers = [payload]
+    data = payload.get('data')
+    if isinstance(data, dict):
+        containers.append(data)
+
+    for container in containers:
+        for key in ('hits', 'items', 'results', 'papers', 'records'):
+            hits = container.get(key)
+            if isinstance(hits, list):
+                total = container.get('total')
+                if not isinstance(total, int):
+                    total = container.get('total_count')
+                return [hit for hit in hits if isinstance(hit, dict)], total if isinstance(total, int) else None
+    return [], None
+
+
+def _normalize_sciverse_item(
+    item: Dict[str, Any],
+    include_content: bool,
+    *,
+    search_type: str,
+) -> Dict[str, Any]:
+    title = str(_first_present(item, ('title', 'paper_title', 'name'), '')).strip()
+    doi = str(_first_present(item, ('doi', 'publication_doi'), '')).strip()
+    doc_id = str(_first_present(item, ('doc_id', 'document_id', 'id'), '')).strip()
+    abstract = str(_first_present(item, ('abstract', 'summary', 'description'), '')).strip()
+    chunk = str(_first_present(item, ('chunk', 'text', 'content'), '')).strip()
+    venue = str(_first_present(item, ('publication_venue_name', 'venue', 'journal'), '')).strip()
+    year = _first_present(item, ('publication_published_year', 'year', 'published_year'), '')
+    score = _first_present(item, ('score', 'relevance_score'), None)
+    url = str(_first_present(item, ('url', 'paper_url', 'source_url'), '')).strip()
+    if not url and doi and search_type != 'agentic':
+        url = f'https://doi.org/{doi}'
+
+    snippet_parts = [part for part in (abstract, chunk) if part]
+    snippet = _truncate_text('\n'.join(snippet_parts), 800)
+
+    extra: Dict[str, Any] = {}
+    for key, value in (
+        ('doc_id', doc_id),
+        ('doi', doi),
+        ('year', year),
+        ('venue', venue),
+        ('authors', _stringify_authors(_first_present(item, ('authors', 'author_names'), []))),
+        ('score', score),
+        ('chunk_id', _first_present(item, ('chunk_id',), '')),
+        ('page_no', _first_present(item, ('page_no', 'page'), '')),
+        ('offset', _first_present(item, ('offset',), '')),
+    ):
+        if value not in (None, ''):
+            extra[key] = value
+
+    normalized = {
+        'title': title,
+        'snippet': snippet,
+        'source': 'sciverse',
+    }
+    if url:
+        normalized['url'] = url
+    if extra:
+        normalized['extra'] = extra
+    if include_content and (chunk or abstract):
+        normalized['content'] = _truncate_text(chunk or abstract)
+    return normalized
+
+
+def _sciverse_headers(api_key: str) -> Dict[str, str]:
+    return {
+        'Authorization': f'Bearer {api_key}',
+        'Content-Type': 'application/json',
+        'User-Agent': 'LazyMind Sciverse Search',
+    }
+
+
+def _sciverse_endpoint(base_url: str, path: str) -> str:
+    return urljoin(base_url.rstrip('/') + '/', path.lstrip('/'))
+
+
+def _run_sciverse_search(
+    *,
+    query: str,
+    max_results: int,
+    include_content: bool,
+    search_type: str,
+    year_from: Optional[int],
+    year_to: Optional[int],
+    fields: Optional[List[str]],
+) -> Dict[str, Any]:
+    config = _agentic_config()
+    api_key = _config_str(config, 'sciverse_search_api_key')
+    if not api_key:
+        raise ValueError('sciverse search is not configured: missing LAZYMIND_SCIVERSE_SEARCH_API_KEY')
+
+    base_url = _config_str(config, 'sciverse_search_base_url', 'https://api.sciverse.space')
+    timeout = _config_int(config, 'sciverse_search_timeout', 15)
+    limit = max(1, min(int(max_results), 10))
+    normalized_type = str(search_type or 'meta').strip().lower()
+
+    if normalized_type == 'agentic':
+        endpoint = _sciverse_endpoint(base_url, '/agentic-search')
+        payload: Dict[str, Any] = {'query': query, 'top_k': limit}
+    elif normalized_type == 'meta':
+        endpoint = _sciverse_endpoint(base_url, '/meta-search')
+        filters = []
+        if year_from is not None:
+            filters.append({
+                'field': 'publication_published_year',
+                'operator': 'FILTER_OP_GTE',
+                'value': int(year_from),
+            })
+        if year_to is not None:
+            filters.append({
+                'field': 'publication_published_year',
+                'operator': 'FILTER_OP_LTE',
+                'value': int(year_to),
+            })
+        payload = {
+            'query': query,
+            'fields': fields or list(_SCIVERSE_DEFAULT_FIELDS),
+            'page': 1,
+            'page_size': limit,
+        }
+        if filters:
+            payload['filters'] = filters
+    else:
+        raise ValueError("search_type must be one of 'meta' or 'agentic'")
+
+    response = requests.post(
+        endpoint,
+        headers=_sciverse_headers(api_key),
+        json=payload,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict):
+        raise ValueError('Sciverse response must be a JSON object')
+
+    hits, reported_total = _extract_sciverse_hits(data)
+    serialized_items = [
+        _normalize_sciverse_item(
+            item,
+            include_content=include_content,
+            search_type=normalized_type,
+        )
+        for item in hits[:limit]
+    ]
+    literature_passages = [
+        {
+            'title': item.get('title', ''),
+            'passage': item.get('content') or item.get('snippet', ''),
+            'doc_id': (item.get('extra') or {}).get('doc_id', ''),
+            'page_no': (item.get('extra') or {}).get('page_no', ''),
+            'score': (item.get('extra') or {}).get('score', ''),
+        }
+        for item in serialized_items
+        if item.get('content') or item.get('snippet')
+    ]
+    return {
+        'success': True,
+        'status': 'answer_ready' if literature_passages else ('ok' if serialized_items else 'no_results'),
+        'query': query,
+        'source': 'sciverse',
+        'search_type': normalized_type,
+        'total': len(serialized_items),
+        'reported_total': reported_total,
+        'answer_instruction': (
+            'Use literature_passages to answer the user directly. Do not call url_fetch, '
+            'web_search, or other web retrieval tools after this successful Sciverse result '
+            'unless the user explicitly asks to inspect an original webpage.'
+        ) if literature_passages else '',
+        'literature_passages': literature_passages,
+        'items': serialized_items,
     }
 
 
@@ -488,6 +722,63 @@ def arxiv_search(
         'total': len(serialized_items),
         'items': serialized_items,
     }
+
+
+@fc_register('tool', execute_in_sandbox=False)
+@_handle_tool_errors
+def sciverse_search(
+    query: str,
+    max_results: int = 5,
+    include_content: bool = True,
+    search_type: Literal['meta', 'agentic'] = 'agentic',
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Search Sciverse scientific literature records.
+
+    Prefer this tool over `web_search` for paper titles, research topics,
+    author-related questions, abstracts, DOI/metadata lookup, or scientific
+    literature retrieval after knowledge-base evidence is unavailable or
+    insufficient. This is a terminal retrieval tool for scientific question
+    answering: when it returns `status='answer_ready'`, immediately answer
+    from `literature_passages` and do not call `url_fetch`, `web_search`, or
+    another web retrieval tool. Use the default `search_type='agentic'` for
+    scientific question answering because it returns citable literature
+    snippets. Use `search_type='meta'` only for bibliographic lists or
+    structured metadata lookup.
+
+    Args:
+        query: Paper title, topic, author keywords, DOI, or scientific query.
+        max_results: Maximum number of result items to return.
+        include_content: Whether to include abstract/chunk text in `content`.
+        search_type: `meta` returns bibliographic metadata; `agentic`
+            returns citable text chunks when the query needs passage evidence.
+        year_from: Optional inclusive lower bound for publication year.
+        year_to: Optional inclusive upper bound for publication year.
+
+    Returns:
+        A compact dict with Sciverse search results.
+    """
+    normalized_query = str(query or '').strip()
+    if not normalized_query:
+        raise ValueError('query is required')
+
+    try:
+        return _run_sciverse_search(
+            query=normalized_query,
+            max_results=max_results,
+            include_content=include_content,
+            search_type=search_type,
+            year_from=year_from,
+            year_to=year_to,
+            fields=None,
+        )
+    except Exception as exc:
+        return _search_failure(
+            normalized_query,
+            'sciverse',
+            _classify_search_exception(exc),
+        )
 
 
 @fc_register('tool', execute_in_sandbox=False)

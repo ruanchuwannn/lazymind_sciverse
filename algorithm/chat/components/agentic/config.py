@@ -23,9 +23,9 @@ DEFAULT_TOOLS = [
     'kb_get_window_nodes',
     'kb_keyword_search',
     'calculator',
+    'sciverse_search',
     'web_search',
     'url_fetch',
-    'arxiv_search',
     'vision_extractor',
     'vocab_manage',
     'memory',
@@ -274,4 +274,7 @@ def _get_runtime_agent_defaults() -> Dict[str, Any]:
         'web_search_bocha_api_key': _cfg['web_search_bocha_api_key'],
         'web_search_bocha_base_url': _cfg['web_search_bocha_base_url'],
         'arxiv_search_timeout': _cfg['arxiv_search_timeout'],
+        'sciverse_search_api_key': _cfg['sciverse_search_api_key'],
+        'sciverse_search_base_url': _cfg['sciverse_search_base_url'],
+        'sciverse_search_timeout': _cfg['sciverse_search_timeout'],
     }

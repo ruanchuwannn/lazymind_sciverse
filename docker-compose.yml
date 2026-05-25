@@ -654,6 +654,12 @@ services:
       - ./algorithm/parsing:/app/parsing:ro
       - ./algorithm/processor:/app/processor:ro
       - ./algorithm/config.py:/app/config.py:ro
+      - ./algorithm/chat:/app/algorithm/chat:ro
+      - ./algorithm/common:/app/algorithm/common:ro
+      - ./algorithm/vocab:/app/algorithm/vocab:ro
+      - ./algorithm/parsing:/app/algorithm/parsing:ro
+      - ./algorithm/processor:/app/algorithm/processor:ro
+      - ./algorithm/config.py:/app/algorithm/config.py:ro
       - ./algorithm/lazyllm:/opt/lazyllm:ro
     healthcheck:
       test: ['CMD-SHELL', 'curl -sf http://localhost:8046/docs || exit 1']
@@ -676,6 +682,9 @@ services:
       LAZYMIND_REVIEW_MAX_RETRIES: "5"
       LAZYMIND_MEMORY_REVIEW_INTERVAL: "1"
       LAZYMIND_SKILL_REVIEW_INTERVAL: "5"
+      LAZYMIND_SCIVERSE_SEARCH_API_KEY: ${LAZYMIND_SCIVERSE_SEARCH_API_KEY:-}
+      LAZYMIND_SCIVERSE_SEARCH_BASE_URL: ${LAZYMIND_SCIVERSE_SEARCH_BASE_URL:-https://api.sciverse.space}
+      LAZYMIND_SCIVERSE_SEARCH_TIMEOUT: ${LAZYMIND_SCIVERSE_SEARCH_TIMEOUT:-15}
       LAZYMIND_SKILL_REVIEW_DEBUG: "false"
       LAZYMIND_SKIP_STARTUP_PIPELINE: "1"
       # Chat uses the shared model config selector. Default dynamic mode enables
@@ -684,6 +693,7 @@ services:
       LAZYMIND_MODEL_CONFIG_PATH: ${LAZYMIND_MODEL_CONFIG_PATH:-dynamic}
       LAZYMIND_CORE_SERVICE_URL: http://core:8000
       LAZYMIND_WORD_GROUP_APPLY_URL: ""
+      PYTHONPATH: /opt/lazyllm:/app:/app/algorithm
       <<: [*runtime-home, *trace-config, *proxy-env, *db-conn, *core-db-conn, *llm-api-keys, *upload-paths]
     command: ["python", "-m", "chat.app.chat", "--port", "8046"]
     depends_on:
