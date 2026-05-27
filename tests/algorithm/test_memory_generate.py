@@ -1,23 +1,32 @@
+import importlib
 import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
 def _load_memory_generate_module():
-    module_path = (
+    package_dir = (
         Path(__file__).resolve().parents[2]
-        / 'algorithm/chat/pipelines/memory_generate.py'
+        / 'algorithm/chat/pipelines/memory_generate'
     )
-    spec = importlib.util.spec_from_file_location('test_memory_generate_module', module_path)
+    spec = importlib.util.spec_from_file_location(
+        'chat.pipelines.memory_generate',
+        package_dir / '__init__.py',
+        submodule_search_locations=[str(package_dir)],
+    )
     assert spec is not None
     assert spec.loader is not None
 
     fake_lazyllm = ModuleType('lazyllm')
     fake_lazyllm.AutoModel = lambda *args, **kwargs: object()
+
+    fake_pipelines_pkg = ModuleType('chat.pipelines')
+    fake_pipelines_pkg.__path__ = []
 
     fake_skill_manager = ModuleType('chat.tools.skill_manager')
     fake_skill_manager._validate_skill_content = lambda *_args, **_kwargs: None
@@ -27,15 +36,28 @@ def _load_memory_generate_module():
 
     original_modules = {
         'lazyllm': sys.modules.get('lazyllm'),
+        'chat.pipelines': sys.modules.get('chat.pipelines'),
         'chat.tools.skill_manager': sys.modules.get('chat.tools.skill_manager'),
         'chat.utils.load_config': sys.modules.get('chat.utils.load_config'),
     }
+    module_names = [
+        name for name in list(sys.modules)
+        if name == 'chat.pipelines.memory_generate'
+        or name.startswith('chat.pipelines.memory_generate.')
+    ]
+    original_memory_generate_modules = {
+        name: sys.modules.get(name)
+        for name in module_names
+    }
 
-    module = importlib.util.module_from_spec(spec)
     try:
         sys.modules['lazyllm'] = fake_lazyllm
+        sys.modules['chat.pipelines'] = fake_pipelines_pkg
         sys.modules['chat.tools.skill_manager'] = fake_skill_manager
         sys.modules['chat.utils.load_config'] = fake_load_config
+        for name in module_names:
+            sys.modules.pop(name, None)
+        module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
@@ -44,6 +66,11 @@ def _load_memory_generate_module():
             if original is None:
                 sys.modules.pop(name, None)
             else:
+                sys.modules[name] = original
+        for name in module_names:
+            sys.modules.pop(name, None)
+        for name, original in original_memory_generate_modules.items():
+            if original is not None:
                 sys.modules[name] = original
 
 
