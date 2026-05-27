@@ -49,11 +49,43 @@ var (
 )
 
 func payloadForLog(v any) string {
-	b, err := json.Marshal(v)
+	b, err := json.Marshal(redactPayloadForLog(v))
 	if err != nil {
 		return ""
 	}
 	return string(b)
+}
+
+func redactPayloadForLog(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var payload any
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return v
+	}
+	return redactLogValue(payload)
+}
+
+func redactLogValue(v any) any {
+	switch typed := v.(type) {
+	case map[string]any:
+		for key, value := range typed {
+			if strings.EqualFold(key, "api_key") {
+				if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+					typed[key] = "set"
+				}
+				continue
+			}
+			typed[key] = redactLogValue(value)
+		}
+	case []any:
+		for idx, value := range typed {
+			typed[idx] = redactLogValue(value)
+		}
+	}
+	return v
 }
 
 func Suggestion(w http.ResponseWriter, r *http.Request) {

@@ -12,6 +12,7 @@ import (
 	"lazymind/core/algo"
 	"lazymind/core/common"
 	"lazymind/core/common/orm"
+	"lazymind/core/modelconfig"
 	"lazymind/core/store"
 )
 
@@ -188,9 +189,14 @@ func applyManagedMemoryAutoEvolution(ctx context.Context, db *gorm.DB, row orm.S
 	if len(pending) == 0 {
 		return false, nil
 	}
+	llmConfig, err := modelconfig.LoadLLMConfig(ctx, db, row.UserID)
+	if err != nil {
+		return false, err
+	}
 	generated, genErr := algo.GenerateMemory(ctx, algo.MemoryGenerateRequest{
 		Content:     row.Content,
 		Suggestions: memoryAlgoSuggestions(pending),
+		LLMConfig:   llmConfig,
 	})
 	if genErr != nil {
 		return false, genErr
@@ -232,9 +238,14 @@ func applyManagedPreferenceAutoEvolution(ctx context.Context, db *gorm.DB, row o
 	if len(pending) == 0 {
 		return false, nil
 	}
+	llmConfig, err := modelconfig.LoadLLMConfig(ctx, db, row.UserID)
+	if err != nil {
+		return false, err
+	}
 	generated, genErr := algo.GenerateUserPreference(ctx, algo.MemoryGenerateRequest{
 		Content:     row.Content,
 		Suggestions: prefAlgoSuggestions(pending),
+		LLMConfig:   llmConfig,
 	})
 	if genErr != nil {
 		return false, genErr

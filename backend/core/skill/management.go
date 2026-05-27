@@ -18,6 +18,7 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	appLog "lazymind/core/log"
+	"lazymind/core/modelconfig"
 	"lazymind/core/store"
 )
 
@@ -411,10 +412,16 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	llmConfig, err := modelconfig.LoadLLMConfig(r.Context(), db, userID)
+	if err != nil {
+		common.ReplyErr(w, "load llm config failed", http.StatusInternalServerError)
+		return
+	}
 	algoReq := algo.SkillGenerateRequest{
 		Content:      content,
 		Suggestions:  toAlgoSuggestions(suggestions),
 		UserInstruct: req.UserInstruct,
+		LLMConfig:    llmConfig,
 	}
 	appLog.Logger.Info().
 		Str("route", "/skills/{skill_id}:generate").
@@ -1747,9 +1754,18 @@ func applySkillAutoEvolution(ctx context.Context, db *gorm.DB, row orm.SkillReso
 		return false, contentErr
 	}
 
+	userID := strings.TrimSpace(row.OwnerUserID)
+	if userID == "" {
+		userID = strings.TrimSpace(row.CreateUserID)
+	}
+	llmConfig, err := modelconfig.LoadLLMConfig(ctx, db, userID)
+	if err != nil {
+		return false, err
+	}
 	generated, genErr := algo.GenerateSkill(ctx, algo.SkillGenerateRequest{
 		Content:     content,
 		Suggestions: toAlgoSuggestions(pending),
+		LLMConfig:   llmConfig,
 	})
 	if genErr != nil {
 		return false, genErr

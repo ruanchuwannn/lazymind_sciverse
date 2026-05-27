@@ -49,6 +49,7 @@ def _load_memory_generate_module():
 
 memory_generate = _load_memory_generate_module()
 BadRequestError = memory_generate.BadRequestError
+_apply_skill_edit_operations = memory_generate._apply_skill_edit_operations
 _apply_memory_edit_operations = memory_generate._apply_memory_edit_operations
 _apply_user_preference_edit_operations = memory_generate._apply_user_preference_edit_operations
 _build_generate_prompt = memory_generate._build_generate_prompt
@@ -150,6 +151,157 @@ def test_generate_prompts_include_stale_content_governance():
         assert 'Remaining budget before merging suggestions' in prompt
 
 
+def test_skill_generate_prompt_accepts_complete_content_and_edit_operations():
+    prompt = _build_generate_prompt(
+        memory_type='skill',
+        content=(
+            '---\n'
+            'name: test-skill\n'
+            'description: Old description\n'
+            '---\n\n'
+            '## Steps\n'
+            '- Old step'
+        ),
+        suggestions=[{'title': 'Update', 'content': 'Add validation guidance.'}],
+        user_instruct=None,
+    )
+
+    assert 'Preferred JSON structure is {"content": "<new complete SKILL.md>"}' in prompt
+    assert 'You may instead output {"operations": [...]}' in prompt
+    assert 'exact old text is absent, outdated, ambiguous' in prompt
+    assert 'replace_section' in prompt
+    assert 'update_frontmatter' in prompt
+
+
+def test_skill_generate_prompt_prefers_replace_text_for_single_line_deletion():
+    prompt = _build_generate_prompt(
+        memory_type='skill',
+        content=(
+            '---\n'
+            'name: test-skill\n'
+            'description: Old description\n'
+            '---\n\n'
+            '## Steps\n'
+            '- Keep this\n'
+            '- Delete this exact line'
+        ),
+        suggestions=[{
+            'title': 'Remove one line',
+            'content': 'Delete the line "- Delete this exact line".',
+        }],
+        user_instruct=None,
+    )
+
+    assert 'use a single `replace_text` operation' in prompt
+    assert 'do NOT update frontmatter description' in prompt
+    assert 'new set to ""' in prompt
+
+
+def test_skill_edit_operations_can_delete_one_line_with_replace_text():
+    current = (
+        '---\n'
+        'name: test-skill\n'
+        'description: Keep description\n'
+        '---\n\n'
+        '## Steps\n'
+        '- Keep this\n'
+        '- Delete this exact line\n'
+        '- Keep that'
+    )
+
+    edited = _apply_skill_edit_operations(
+        current,
+        {
+            'operations': [
+                {
+                    'op': 'replace_text',
+                    'old': '- Delete this exact line\n',
+                    'new': '',
+                },
+            ],
+        },
+    )
+
+    assert edited == (
+        '---\n'
+        'name: test-skill\n'
+        'description: Keep description\n'
+        '---\n\n'
+        '## Steps\n'
+        '- Keep this\n'
+        '- Keep that'
+    )
+
+
+def test_skill_edit_operations_update_frontmatter_and_replace_section():
+    current = (
+        '---\n'
+        'name: test-skill\n'
+        'description: Old description\n'
+        '---\n\n'
+        '## Steps\n'
+        '- Old step\n\n'
+        '## Validation\n'
+        '- Old validation'
+    )
+
+    edited = _apply_skill_edit_operations(
+        current,
+        {
+            'operations': [
+                {
+                    'op': 'update_frontmatter',
+                    'fields': {
+                        'description': 'Use when checking generated drafts.',
+                    },
+                },
+                {
+                    'op': 'replace_section',
+                    'heading': '## Validation',
+                    'content': '- Check the diff before confirming.\n- Reject stale suggestions.',
+                },
+            ],
+        },
+    )
+
+    assert edited == (
+        '---\n'
+        'name: test-skill\n'
+        'description: Use when checking generated drafts.\n'
+        '---\n\n'
+        '## Steps\n'
+        '- Old step\n\n'
+        '## Validation\n'
+        '- Check the diff before confirming.\n'
+        '- Reject stale suggestions.'
+    )
+
+
+def test_skill_edit_operations_preserve_legacy_content_payload():
+    edited = _apply_skill_edit_operations(
+        'old',
+        {
+            'content': (
+                '---\n'
+                'name: test-skill\n'
+                'description: New description\n'
+                '---\n\n'
+                '## Steps\n'
+                '- New step'
+            ),
+        },
+    )
+
+    assert edited == (
+        '---\n'
+        'name: test-skill\n'
+        'description: New description\n'
+        '---\n\n'
+        '## Steps\n'
+        '- New step'
+    )
+
+
 def test_memory_edit_operations_preserve_upsert_day_before_replace_text():
     current = (
         '- 2026-05-14\n'
@@ -211,6 +363,48 @@ def test_memory_edit_operations_can_clear_all_memory_via_upsert_replace():
     )
 
     assert edited == ''
+
+
+def test_memory_edit_operations_preserve_legacy_content_payload():
+    edited = _apply_memory_edit_operations(
+        'old memory',
+        {
+            'content': '- 2026-05-26\n  我们讨论了:\n  - restored complete draft flow',
+        },
+    )
+
+    assert edited == '- 2026-05-26\n  我们讨论了:\n  - restored complete draft flow'
+
+
+def test_memory_edit_operations_reject_replace_all_with_extra_operations():
+    with pytest.raises(UnprocessableContentError, match='replace_all must be the only operation'):
+        _apply_memory_edit_operations(
+        '- 2026-05-25\n  我们讨论了:\n  - old',
+        {
+            'operations': [
+                {
+                    'op': 'replace_all',
+                    'content': '- 2026-05-26\n  我们讨论了:\n  - new full draft',
+                },
+                {
+                    'op': 'upsert_day',
+                    'date': '2026-05-27',
+                    'discussed': ['ignored because replace_all is complete'],
+                },
+            ],
+        },
+        )
+
+
+def test_user_preference_edit_operations_preserve_legacy_content_payload():
+    edited = _apply_user_preference_edit_operations(
+        'old preference',
+        {
+            'content': '- Prefers concise technical explanations',
+        },
+    )
+
+    assert edited == '- Prefers concise technical explanations'
 
 
 def test_user_preference_edit_operations_can_clear_all_content_via_replace_all():

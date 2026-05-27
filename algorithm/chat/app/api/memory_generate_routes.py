@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+import lazyllm
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic import model_validator
 
@@ -13,6 +15,7 @@ from chat.pipelines.memory_generate import (
     UnprocessableContentError,
     generate_memory_content,
 )
+from chat.utils.load_config import inject_model_config
 
 router = APIRouter()
 
@@ -35,6 +38,10 @@ class GeneratePayload(BaseModel):
         description='List of suggestions to merge',
     )
     user_instruct: Optional[str] = Field(default=None, description='Natural language instruction directly from the user')  # noqa: E501
+    llm_config: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description='Per-request model configuration loaded by core for the current user',
+    )
 
     @model_validator(mode='after')
     def validate_generation_inputs(self) -> 'GeneratePayload':
@@ -56,8 +63,16 @@ def _fail(status_code: int, msg: str) -> JSONResponse:
     )
 
 
+def _init_generate_session(memory_type: MemoryType, model_config: Optional[Dict[str, Any]]) -> None:
+    session_id = f'{memory_type}_generate_{uuid4().hex}'
+    lazyllm.globals._init_sid(sid=session_id)
+    lazyllm.locals._init_sid(sid=session_id)
+    inject_model_config(model_config)
+
+
 def _handle_generate(memory_type: MemoryType, payload: GeneratePayload):
     try:
+        _init_generate_session(memory_type, payload.llm_config)
         generated = generate_memory_content(
             memory_type=memory_type,
             content=payload.content,

@@ -15,6 +15,7 @@ import (
 	"lazymind/core/common/orm"
 	"lazymind/core/evolution"
 	appLog "lazymind/core/log"
+	"lazymind/core/modelconfig"
 	"lazymind/core/store"
 )
 
@@ -46,11 +47,43 @@ type draftPreviewResponse struct {
 const maxManagedContentChars = 1500
 
 func payloadForLog(v any) string {
-	b, err := json.Marshal(v)
+	b, err := json.Marshal(redactPayloadForLog(v))
 	if err != nil {
 		return ""
 	}
 	return string(b)
+}
+
+func redactPayloadForLog(v any) any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var payload any
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return v
+	}
+	return redactLogValue(payload)
+}
+
+func redactLogValue(v any) any {
+	switch typed := v.(type) {
+	case map[string]any:
+		for key, value := range typed {
+			if strings.EqualFold(key, "api_key") {
+				if s, ok := value.(string); ok && strings.TrimSpace(s) != "" {
+					typed[key] = "set"
+				}
+				continue
+			}
+			typed[key] = redactLogValue(value)
+		}
+	case []any:
+		for idx, value := range typed {
+			typed[idx] = redactLogValue(value)
+		}
+	}
+	return v
 }
 
 func compactManagedContent(content string) string {
@@ -479,10 +512,16 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	llmConfig, err := modelconfig.LoadLLMConfig(r.Context(), db, userID)
+	if err != nil {
+		common.ReplyErr(w, "load llm config failed", http.StatusInternalServerError)
+		return
+	}
 	algoReq := algo.MemoryGenerateRequest{
 		Content:      content,
 		Suggestions:  toAlgoSuggestions(suggestions),
 		UserInstruct: req.UserInstruct,
+		LLMConfig:    llmConfig,
 	}
 	appLog.Logger.Info().
 		Str("route", "/user-preference:generate").
