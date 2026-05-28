@@ -24,20 +24,21 @@ EDIT_OUTPUT_SPEC = (
     '2. Preferred JSON structure is {"operations": [...]}.\n'
     '3. Supported operations are only replace_text and replace_all.\n'
     '4. Do not output any operation except replace_text or replace_all.\n'
-    '5. Prefer {"op":"replace_text","old":"<exact old text>","new":"<new text>"} for exact local edits when old is a non-empty substring copied verbatim from current content.\n'  # noqa: E501
+    '5. Prefer {"op":"replace_text","old":"<exact old text>","new":"<new text>"} for exact local edits when old is a non-empty substring copied verbatim from current content; use empty old only for already-satisfied delete/remove requests.\n'  # noqa: E501
     '6. You may output multiple replace_text operations; they will be applied in order.\n'
     '7. Before final output, mentally apply operations in order to the current content using exact plain string search.\n'  # noqa: E501
-    '8. For every replace_text, old must be found exactly in the content state at the moment that operation runs.\n'  # noqa: E501
+    '8. For every replace_text, old must be found exactly in the content state at the moment that operation runs, except the skipped-delete placeholder {"op":"replace_text","old":"","new":""}.\n'  # noqa: E501
     '9. Keep every replace_text old value as short as safely possible: use one exact line for line deletion/replacement, or one exact phrase/sentence for wording edits.\n'  # noqa: E501
     '10. Never use a whole section, a heading plus body, multiple bullets/list items, or unrelated paragraphs as one replace_text old. Split the change into several smaller replace_text operations instead.\n'  # noqa: E501
     '11. Never paraphrase, summarize, translate, re-indent, normalize whitespace, or invent old; old must preserve the exact characters, punctuation, spaces, and line breaks from current content.\n'  # noqa: E501
     '12. replace_text always replaces the first matching occurrence only.\n'
     '13. For delete/remove suggestions, the target text may appear in old but MUST NOT appear in new. Do not add, restore, or reword text that a suggestion asks to delete.\n'  # noqa: E501
-    '14. If a deletion target or quoted sentence from a suggestion is absent from current content, treat that deletion as already satisfied and do not output any operation for that missing target.\n'  # noqa: E501
-    '15. Do not output no-op replace_text operations where old and new are identical.\n'
+    '14. If a deletion target or quoted sentence from a suggestion is absent from current content, treat that deletion as already satisfied and output {"op":"replace_text","old":"","new":""} for that missing target.\n'  # noqa: E501
+    '15. Do not output no-op replace_text operations where old and new are identical, except {"op":"replace_text","old":"","new":""} for already-satisfied delete/remove targets.\n'  # noqa: E501
     '16. If the exact old text is absent, outdated, ambiguous, not copied verbatim, or not enough to apply all requested changes safely, output full {"content": "..."} instead of operations.\n'  # noqa: E501
     '17. You may also use {"op":"replace_all","content":"<new full text>"} for full replacement.\n'
     '18. If you use replace_all, it MUST be the only operation in the operations array; do not output replace_all together with any other operation.\n'  # noqa: E501
+    '19. The final generated content must differ from current content; never return a no-op draft.\n'
 )
 
 
@@ -103,8 +104,15 @@ def format_retry_note(previous_error: Optional[str]) -> str:
             f'\nPrevious output was invalid, error: {previous_error}\n'
             'Correction requirement: do not retry with any replace_text operation unless each old value is copied '
             'verbatim from current content and can be found by exact plain string search. If a delete/remove target '
-            'is already absent, omit that operation. If you cannot guarantee a non-delete edit, output full '
+            'is already absent, output {"op":"replace_text","old":"","new":""}. If you cannot guarantee a non-delete edit, output full '
             '{"content": "..."} instead of operations.\n'
+        )
+    if 'content is unchanged' in previous_error:
+        return (
+            f'\nPrevious output was invalid, error: {previous_error}\n'
+            'Correction requirement: the next output must create a real content diff. '
+            'Do not return current content unchanged. If requested deletions are already absent, '
+            'output {"operations":[{"op":"replace_text","old":"","new":""}]} instead.\n'
         )
     return f'\nPrevious output was invalid, error: {previous_error}\nPlease correct and regenerate.\n'
 

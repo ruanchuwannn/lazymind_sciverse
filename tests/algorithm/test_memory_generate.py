@@ -206,7 +206,7 @@ def test_skill_generate_prompt_uses_unified_edit_operations():
     assert 'Do not make a replace_text old value span multiple markdown sections' in prompt
     assert 'MUST NOT appear in new' in prompt
     assert 'never leave numbering gaps' in prompt
-    assert 'do not output any operation for that missing target' in prompt
+    assert 'old":"","new":""' in prompt
     assert 'delete, clear, or remove all skill content' in prompt
     assert 'mentally apply operations in order' in prompt
     assert 'old must be found exactly in the content state' in prompt
@@ -373,6 +373,54 @@ def test_skill_generate_retries_with_common_content_when_operations_old_missing(
     assert 'output full {"content": "..."} instead of operations' in fake_llm.prompts[1]
 
 
+def test_memory_generate_returns_blank_noop_draft_when_delete_targets_are_missing():
+    class FakeLLM:
+        def __init__(self):
+            self.prompts = []
+
+        def __call__(self, prompt):
+            self.prompts.append(prompt)
+            return '{"operations":[{"op":"replace_text","old":"- Missing line","new":""}]}'
+
+    pipeline = MemoryGeneratePipeline.__new__(MemoryGeneratePipeline)
+    fake_llm = FakeLLM()
+    pipeline.llm = fake_llm
+
+    generated = pipeline.generate(
+        memory_type='memory',
+        content='- Keep this',
+        suggestions=[{'title': 'Remove', 'content': 'Delete a missing line.'}],
+        user_instruct=None,
+    )
+
+    assert generated == '- Keep this\n\u200b'
+    assert len(fake_llm.prompts) == 1
+
+
+def test_memory_generate_rejects_unchanged_full_content_payload():
+    class FakeLLM:
+        def __init__(self):
+            self.prompts = []
+
+        def __call__(self, prompt):
+            self.prompts.append(prompt)
+            return '{"content":"- Keep this"}'
+
+    pipeline = MemoryGeneratePipeline.__new__(MemoryGeneratePipeline)
+    fake_llm = FakeLLM()
+    pipeline.llm = fake_llm
+
+    with pytest.raises(UnprocessableContentError, match='content is unchanged'):
+        pipeline.generate(
+            memory_type='memory',
+            content='- Keep this',
+            suggestions=[{'title': 'Update', 'content': 'Apply a real change.'}],
+            user_instruct=None,
+        )
+
+    assert len(fake_llm.prompts) == 3
+
+
 def test_skill_edit_operations_skip_missing_delete_targets():
     edited = _apply_edit_operations(
         '- Keep this',
@@ -434,7 +482,42 @@ def test_memory_edit_operations_skip_missing_delete_targets():
         entity_name='memory',
     )
 
-    assert edited == '- Keep this'
+    assert edited == '- Keep this\n\u200b'
+
+
+def test_memory_edit_operations_allow_empty_old_empty_new_noop_marker():
+    edited = _apply_edit_operations(
+        '- Keep this',
+        {
+            'operations': [
+                {
+                    'op': 'replace_text',
+                    'old': '',
+                    'new': '',
+                },
+            ],
+        },
+        entity_name='memory',
+    )
+
+    assert edited == '- Keep this\n\u200b'
+
+
+def test_edit_operations_reject_empty_old_with_non_empty_new():
+    with pytest.raises(UnprocessableContentError, match="empty 'old'"):
+        _apply_edit_operations(
+            '- Keep this',
+            {
+                'operations': [
+                    {
+                        'op': 'replace_text',
+                        'old': '',
+                        'new': '- Inserted',
+                    },
+                ],
+            },
+            entity_name='memory',
+        )
 
 
 def test_user_preference_edit_operations_skip_missing_delete_targets():
@@ -452,7 +535,7 @@ def test_user_preference_edit_operations_skip_missing_delete_targets():
         entity_name='user_preference',
     )
 
-    assert edited == '- Prefers concise replies'
+    assert edited == '- Prefers concise replies\n\u200b'
 
 
 def test_edit_operations_reject_missing_non_delete_targets():

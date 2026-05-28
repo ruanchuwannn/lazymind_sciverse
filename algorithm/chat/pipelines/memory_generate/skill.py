@@ -48,11 +48,11 @@ def build_skill_prompt(
         '- Do not make a replace_text old value span multiple markdown sections, headings, or unrelated paragraphs. Split the change into several smaller replace_text operations instead.\n'  # noqa: E501
         '- For numbered-list deletion or insertion, use one replace_text to delete/insert the target line and separate replace_text operations to renumber each affected line; after deleting item N, renumber N+1 to N, N+2 to N+1, and so on. Never leave numbering gaps.\n'  # noqa: E501
         '- For delete/remove suggestions, the quoted target text may appear in old but MUST NOT appear in new. Do not add, restore, or reword text that a suggestion asks to delete.\n'  # noqa: E501
-        '- If a deletion target or quoted sentence from a suggestion is absent from current content, treat that deletion as already satisfied and do not output any operation for that missing target.\n'  # noqa: E501
+        '- If a deletion target or quoted sentence from a suggestion is absent from current content, treat that deletion as already satisfied and output {"op":"replace_text","old":"","new":""} for that missing target.\n'  # noqa: E501
         '- Only when the user explicitly asks to delete, clear, or remove all skill content, output an empty draft via full {"content": ""} or a single replace_all operation with empty content.\n'  # noqa: E501
         '- Example for deleting a numbered item: output one replace_text with old equal to the exact numbered line plus its newline and new equal to "", then separate replace_text operations for each later line number that must change.\n'  # noqa: E501
         '- For adding, removing, or rewriting sections, updating frontmatter, or any edit that cannot be safely targeted by exact short text replacement, output full {"content": "..."} or a single replace_all operation.\n'  # noqa: E501
-        '- For a request like "delete/remove this line", use replace_text only if you can copy the exact line from current content as old; otherwise do not fabricate old text.\n'  # noqa: E501
+        '- For a request like "delete/remove this line", use replace_text only if you can copy the exact line from current content as old; if the target is already absent, use old="" and new="" instead of fabricating old text.\n'  # noqa: E501
         '- The body must be an abstract SOP: steps, decision criteria, checklists, general rules, output format requirements, etc.\n'  # noqa: E501
         '- Do not include specific cases, project names, specific data, conversation snippets, or one-time examples in the SKILL.md body; '  # noqa: E501
         'if examples are needed, use only highly abstract placeholder illustrations.\n'

@@ -164,6 +164,22 @@ def validate_generated_content(memory_type: MemoryType, content: Any) -> str:
     return content
 
 
+def reject_unchanged_content(memory_type: MemoryType, original: str, generated: str) -> str:
+    if generated.strip() == original.strip():
+        raise UnprocessableContentError(
+            f'Generated {memory_type} content is unchanged from current content. '
+            'A draft must contain at least one real content change.'
+        )
+    return generated
+
+
+def build_noop_draft_content(content: str) -> str:
+    base = content.strip()
+    if not base:
+        return EMPTY_DRAFT_PLACEHOLDER
+    return f'{base}\n{EMPTY_DRAFT_PLACEHOLDER}'
+
+
 def normalize_user_instruct(raw_user_instruct: Any) -> Optional[str]:
     if raw_user_instruct is None:
         return None
@@ -247,10 +263,14 @@ def parse_edit_operations(payload: Dict[str, Any], *, entity_name: str) -> List[
         if op_name == 'replace_text':
             old = raw_op.get('old')
             new = raw_op.get('new')
-            if not isinstance(old, str) or not old:
-                raise UnprocessableContentError("replace_text requires a non-empty string field 'old'.")
+            if not isinstance(old, str):
+                raise UnprocessableContentError("replace_text requires a string field 'old'.")
             if not isinstance(new, str):
                 raise UnprocessableContentError("replace_text requires a string field 'new'.")
+            if old == '' and new != '':
+                raise UnprocessableContentError(
+                    "replace_text with an empty 'old' is only allowed when 'new' is also empty."
+                )
             normalized_ops.append({
                 'op': 'replace_text',
                 'old': old,
@@ -270,8 +290,11 @@ def apply_edit_operations(current_content: str, payload: Dict[str, Any], *, enti
 
     current = current_content
     applied_delete = False
+    skipped_noop = False
     for op in operations:
         if op['old'] == op['new']:
+            if op['old'] == '':
+                skipped_noop = True
             continue
         try:
             current = apply_replace_text_operation(
@@ -284,8 +307,12 @@ def apply_edit_operations(current_content: str, payload: Dict[str, Any], *, enti
                 applied_delete = True
         except UnprocessableContentError:
             if not op['new'].strip():
+                skipped_noop = True
                 continue
             raise
     if applied_delete:
         current = normalize_numbered_lists(current)
-    return current.strip()
+    result = current.strip()
+    if skipped_noop and result == current_content.strip():
+        return build_noop_draft_content(result)
+    return result

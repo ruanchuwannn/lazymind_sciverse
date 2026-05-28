@@ -16,6 +16,7 @@ from .common import (
     extract_skill_content,
     normalize_suggestions,
     normalize_user_instruct,
+    reject_unchanged_content,
     validate_generated_content,
 )
 from .memory import build_memory_prompt
@@ -31,6 +32,11 @@ PROMPT_BUILDERS = {
 
 def _validate_raw_skill_content(raw: Any) -> str:
     return validate_generated_content('skill', extract_skill_content(raw))
+
+
+def _validate_generated_result(memory_type: MemoryType, original: str, generated: str) -> str:
+    changed_content = reject_unchanged_content(memory_type, original, generated)
+    return validate_generated_content(memory_type, changed_content)
 
 
 def build_generate_prompt(
@@ -88,7 +94,11 @@ class MemoryGeneratePipeline:
             except UnprocessableContentError as exc:
                 if memory_type == 'skill':
                     try:
-                        return _validate_raw_skill_content(raw)
+                        return _validate_generated_result(
+                            memory_type,
+                            content,
+                            _validate_raw_skill_content(raw),
+                        )
                     except UnprocessableContentError as fallback_exc:
                         error = f'{exc}; raw skill fallback invalid: {fallback_exc}'
                     continue
@@ -101,7 +111,7 @@ class MemoryGeneratePipeline:
                     parsed,
                     entity_name=memory_type,
                 )
-                return validate_generated_content(memory_type, edited_content)
+                return _validate_generated_result(memory_type, content, edited_content)
             except UnprocessableContentError as exc:
                 error = str(exc)
                 continue
