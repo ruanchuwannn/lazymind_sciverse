@@ -76,9 +76,9 @@ def _load_memory_generate_module():
 
 memory_generate = _load_memory_generate_module()
 BadRequestError = memory_generate.BadRequestError
-_apply_skill_edit_operations = memory_generate._apply_skill_edit_operations
-_apply_memory_edit_operations = memory_generate._apply_memory_edit_operations
-_apply_user_preference_edit_operations = memory_generate._apply_user_preference_edit_operations
+MemoryGeneratePipeline = memory_generate.MemoryGeneratePipeline
+UnprocessableContentError = memory_generate.UnprocessableContentError
+_apply_edit_operations = memory_generate._apply_edit_operations
 _build_generate_prompt = memory_generate._build_generate_prompt
 _format_inputs_block = memory_generate._format_inputs_block
 generate_memory_content = memory_generate.generate_memory_content
@@ -178,7 +178,7 @@ def test_generate_prompts_include_stale_content_governance():
         assert 'Remaining budget before merging suggestions' in prompt
 
 
-def test_skill_generate_prompt_accepts_complete_content_and_edit_operations():
+def test_skill_generate_prompt_uses_unified_edit_operations():
     prompt = _build_generate_prompt(
         memory_type='skill',
         content=(
@@ -193,11 +193,27 @@ def test_skill_generate_prompt_accepts_complete_content_and_edit_operations():
         user_instruct=None,
     )
 
-    assert 'Preferred JSON structure is {"content": "<new complete SKILL.md>"}' in prompt
-    assert 'You may instead output {"operations": [...]}' in prompt
+    assert 'Preferred JSON structure is {"operations": [...]}' in prompt
+    assert 'Supported operations are only replace_text and replace_all' in prompt
+    assert 'replace_text is the primary edit path for skill drafts' in prompt
+    assert 'Apply only the exact target explicitly requested' in prompt
+    assert 'Do not infer related cleanup in other sections' in prompt
+    assert 'Do not rewrite Usage, Examples, or neighboring sections' in prompt
+    assert 'Prefer multiple small replace_text operations' in prompt
+    assert 'Hard limit for replace_text old' in prompt
+    assert 'never exceed 200 characters' in prompt
+    assert 'Never use a whole section' in prompt
+    assert 'Do not make a replace_text old value span multiple markdown sections' in prompt
+    assert 'MUST NOT appear in new' in prompt
+    assert 'never leave numbering gaps' in prompt
+    assert 'do not output any operation for that missing target' in prompt
+    assert 'delete, clear, or remove all skill content' in prompt
+    assert 'mentally apply operations in order' in prompt
+    assert 'old must be found exactly in the content state' in prompt
+    assert 'Do not output no-op replace_text operations' in prompt
+    assert 'You may output multiple replace_text operations' in prompt
     assert 'exact old text is absent, outdated, ambiguous' in prompt
-    assert 'replace_section' in prompt
-    assert 'update_frontmatter' in prompt
+    assert 'output full {"content": "..."} instead of operations' in prompt
 
 
 def test_skill_generate_prompt_prefers_replace_text_for_single_line_deletion():
@@ -219,9 +235,10 @@ def test_skill_generate_prompt_prefers_replace_text_for_single_line_deletion():
         user_instruct=None,
     )
 
-    assert 'use a single `replace_text` operation' in prompt
+    assert 'use replace_text only if you can copy the exact line' in prompt
+    assert 'do not fabricate old text' in prompt
     assert 'do NOT update frontmatter description' in prompt
-    assert 'new set to ""' in prompt
+    assert 'Supported operations are only replace_text and replace_all' in prompt
 
 
 def test_skill_edit_operations_can_delete_one_line_with_replace_text():
@@ -236,7 +253,7 @@ def test_skill_edit_operations_can_delete_one_line_with_replace_text():
         '- Keep that'
     )
 
-    edited = _apply_skill_edit_operations(
+    edited = _apply_edit_operations(
         current,
         {
             'operations': [
@@ -247,6 +264,7 @@ def test_skill_edit_operations_can_delete_one_line_with_replace_text():
                 },
             ],
         },
+        entity_name='skill',
     )
 
     assert edited == (
@@ -260,52 +278,24 @@ def test_skill_edit_operations_can_delete_one_line_with_replace_text():
     )
 
 
-def test_skill_edit_operations_update_frontmatter_and_replace_section():
-    current = (
-        '---\n'
-        'name: test-skill\n'
-        'description: Old description\n'
-        '---\n\n'
-        '## Steps\n'
-        '- Old step\n\n'
-        '## Validation\n'
-        '- Old validation'
-    )
-
-    edited = _apply_skill_edit_operations(
-        current,
-        {
-            'operations': [
-                {
-                    'op': 'update_frontmatter',
-                    'fields': {
-                        'description': 'Use when checking generated drafts.',
+def test_edit_operations_reject_unsupported_operations():
+    with pytest.raises(UnprocessableContentError, match='Unsupported skill operation'):
+        _apply_edit_operations(
+            'old',
+            {
+                'operations': [
+                    {
+                        'op': 'append_text',
+                        'content': '- New content',
                     },
-                },
-                {
-                    'op': 'replace_section',
-                    'heading': '## Validation',
-                    'content': '- Check the diff before confirming.\n- Reject stale suggestions.',
-                },
-            ],
-        },
-    )
-
-    assert edited == (
-        '---\n'
-        'name: test-skill\n'
-        'description: Use when checking generated drafts.\n'
-        '---\n\n'
-        '## Steps\n'
-        '- Old step\n\n'
-        '## Validation\n'
-        '- Check the diff before confirming.\n'
-        '- Reject stale suggestions.'
-    )
+                ],
+            },
+            entity_name='skill',
+        )
 
 
 def test_skill_edit_operations_preserve_legacy_content_payload():
-    edited = _apply_skill_edit_operations(
+    edited = _apply_edit_operations(
         'old',
         {
             'content': (
@@ -317,6 +307,7 @@ def test_skill_edit_operations_preserve_legacy_content_payload():
                 '- New step'
             ),
         },
+        entity_name='skill',
     )
 
     assert edited == (
@@ -329,7 +320,158 @@ def test_skill_edit_operations_preserve_legacy_content_payload():
     )
 
 
-def test_memory_edit_operations_preserve_upsert_day_before_replace_text():
+def test_skill_generate_falls_back_to_full_content_when_operations_old_missing():
+    class FakeLLM:
+        def __init__(self):
+            self.prompts = []
+
+        def __call__(self, prompt):
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return (
+                    '{"operations":[{"op":"replace_text",'
+                    '"old":"- Missing exact line","new":"- Replacement"}]}'
+                )
+            return (
+                '{"content":"---\\n'
+                'name: test-skill\\n'
+                'description: Keep description\\n'
+                '---\\n\\n'
+                '## Steps\\n'
+                '- Replacement"}'
+            )
+
+    pipeline = MemoryGeneratePipeline.__new__(MemoryGeneratePipeline)
+    fake_llm = FakeLLM()
+    pipeline.llm = fake_llm
+
+    generated = pipeline.generate(
+        memory_type='skill',
+        content=(
+            '---\n'
+            'name: test-skill\n'
+            'description: Keep description\n'
+            '---\n\n'
+            '## Steps\n'
+            '- Original'
+        ),
+        suggestions=[{'title': 'Update', 'content': 'Replace the step.'}],
+        user_instruct=None,
+    )
+
+    assert generated == (
+        '---\n'
+        'name: test-skill\n'
+        'description: Keep description\n'
+        '---\n\n'
+        '## Steps\n'
+        '- Replacement'
+    )
+    assert len(fake_llm.prompts) == 2
+    assert 'Do not output operations' in fake_llm.prompts[1]
+    assert 'replace_text could not find' in fake_llm.prompts[1]
+
+
+def test_skill_edit_operations_skip_missing_delete_targets():
+    edited = _apply_edit_operations(
+        '- Keep this',
+        {
+            'operations': [
+                {
+                    'op': 'replace_text',
+                    'old': '- Missing line',
+                    'new': '',
+                },
+                {
+                    'op': 'replace_text',
+                    'old': '- Keep this',
+                    'new': '- Keep that',
+                },
+            ],
+        },
+        entity_name='skill',
+    )
+
+    assert edited == '- Keep that'
+
+
+def test_skill_edit_operations_delete_numbered_line_and_normalize_list():
+    edited = _apply_edit_operations(
+        '1. First\n2. Second\n3. Remove this\n4. Fourth\n5. Fifth',
+        {
+            'operations': [
+                {
+                    'op': 'replace_text',
+                    'old': '3. Remove this',
+                    'new': '',
+                },
+                {
+                    'op': 'replace_text',
+                    'old': '5. Fifth',
+                    'new': '4. Fifth',
+                },
+            ],
+        },
+        entity_name='skill',
+    )
+
+    assert edited == '1. First\n2. Second\n3. Fourth\n4. Fifth'
+
+
+def test_memory_edit_operations_skip_missing_delete_targets():
+    edited = _apply_edit_operations(
+        '- Keep this',
+        {
+            'operations': [
+                {
+                    'op': 'replace_text',
+                    'old': '- Missing line',
+                    'new': '',
+                },
+            ],
+        },
+        entity_name='memory',
+    )
+
+    assert edited == '- Keep this'
+
+
+def test_user_preference_edit_operations_skip_missing_delete_targets():
+    edited = _apply_edit_operations(
+        '- Prefers concise replies',
+        {
+            'operations': [
+                {
+                    'op': 'replace_text',
+                    'old': '- Missing preference',
+                    'new': '',
+                },
+            ],
+        },
+        entity_name='user_preference',
+    )
+
+    assert edited == '- Prefers concise replies'
+
+
+def test_edit_operations_reject_missing_non_delete_targets():
+    with pytest.raises(UnprocessableContentError, match='replace_text could not find'):
+        _apply_edit_operations(
+            '- Keep this',
+            {
+                'operations': [
+                    {
+                        'op': 'replace_text',
+                        'old': '- Missing line',
+                        'new': '- Replacement line',
+                    },
+                ],
+            },
+            entity_name='memory',
+        )
+
+
+def test_memory_edit_operations_can_replace_text():
     current = (
         '- 2026-05-14\n'
         '  用户在做:\n'
@@ -338,15 +480,10 @@ def test_memory_edit_operations_preserve_upsert_day_before_replace_text():
         '  - likes tea'
     )
 
-    edited = _apply_memory_edit_operations(
+    edited = _apply_edit_operations(
         current,
         {
             'operations': [
-                {
-                    'op': 'upsert_day',
-                    'date': '2026-05-15',
-                    'doing': ['new task'],
-                },
                 {
                     'op': 'replace_text',
                     'old': 'likes tea',
@@ -354,6 +491,7 @@ def test_memory_edit_operations_preserve_upsert_day_before_replace_text():
                 },
             ],
         },
+        entity_name='memory',
     )
 
     assert edited == (
@@ -361,43 +499,57 @@ def test_memory_edit_operations_preserve_upsert_day_before_replace_text():
         '  用户在做:\n'
         '  - old task\n'
         '  状态/冲突:\n'
-        '  - likes coffee\n'
-        '- 2026-05-15\n'
-        '  用户在做:\n'
-        '  - new task'
+        '  - likes coffee'
     )
 
 
-def test_memory_edit_operations_can_clear_all_memory_via_upsert_replace():
-    current = (
-        '- 2026-05-14\n'
-        '  用户在做:\n'
-        '  - old task'
-    )
-
-    edited = _apply_memory_edit_operations(
-        current,
+def test_edit_operations_can_apply_multiple_replace_text_operations():
+    edited = _apply_edit_operations(
+        '- Prefers verbose replies\n- Uses old workflow',
         {
             'operations': [
                 {
-                    'op': 'upsert_day',
-                    'date': '2026-05-14',
-                    'replace': ['doing'],
-                    'doing': [],
+                    'op': 'replace_text',
+                    'old': 'verbose',
+                    'new': 'concise',
+                },
+                {
+                    'op': 'replace_text',
+                    'old': 'old workflow',
+                    'new': 'new workflow',
                 },
             ],
         },
+        entity_name='user_preference',
+    )
+
+    assert edited == '- Prefers concise replies\n- Uses new workflow'
+
+
+def test_memory_edit_operations_can_clear_all_memory_via_replace_all():
+    edited = _apply_edit_operations(
+        '- 2026-05-14\n  用户在做:\n  - old task',
+        {
+            'operations': [
+                {
+                    'op': 'replace_all',
+                    'content': '',
+                },
+            ],
+        },
+        entity_name='memory',
     )
 
     assert edited == ''
 
 
 def test_memory_edit_operations_preserve_legacy_content_payload():
-    edited = _apply_memory_edit_operations(
+    edited = _apply_edit_operations(
         'old memory',
         {
             'content': '- 2026-05-26\n  我们讨论了:\n  - restored complete draft flow',
         },
+        entity_name='memory',
     )
 
     assert edited == '- 2026-05-26\n  我们讨论了:\n  - restored complete draft flow'
@@ -405,37 +557,39 @@ def test_memory_edit_operations_preserve_legacy_content_payload():
 
 def test_memory_edit_operations_reject_replace_all_with_extra_operations():
     with pytest.raises(UnprocessableContentError, match='replace_all must be the only operation'):
-        _apply_memory_edit_operations(
-        '- 2026-05-25\n  我们讨论了:\n  - old',
-        {
-            'operations': [
-                {
-                    'op': 'replace_all',
-                    'content': '- 2026-05-26\n  我们讨论了:\n  - new full draft',
-                },
-                {
-                    'op': 'upsert_day',
-                    'date': '2026-05-27',
-                    'discussed': ['ignored because replace_all is complete'],
-                },
-            ],
-        },
+        _apply_edit_operations(
+            '- 2026-05-25\n  我们讨论了:\n  - old',
+            {
+                'operations': [
+                    {
+                        'op': 'replace_all',
+                        'content': '- 2026-05-26\n  我们讨论了:\n  - new full draft',
+                    },
+                    {
+                        'op': 'replace_text',
+                        'old': 'old',
+                        'new': 'ignored because replace_all is complete',
+                    },
+                ],
+            },
+            entity_name='memory',
         )
 
 
 def test_user_preference_edit_operations_preserve_legacy_content_payload():
-    edited = _apply_user_preference_edit_operations(
+    edited = _apply_edit_operations(
         'old preference',
         {
             'content': '- Prefers concise technical explanations',
         },
+        entity_name='user_preference',
     )
 
     assert edited == '- Prefers concise technical explanations'
 
 
 def test_user_preference_edit_operations_can_clear_all_content_via_replace_all():
-    edited = _apply_user_preference_edit_operations(
+    edited = _apply_edit_operations(
         'Prefers concise replies',
         {
             'operations': [
@@ -445,6 +599,7 @@ def test_user_preference_edit_operations_can_clear_all_content_via_replace_all()
                 },
             ],
         },
+        entity_name='user_preference',
     )
 
     assert edited == ''

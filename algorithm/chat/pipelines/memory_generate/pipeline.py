@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 from lazyllm import AutoModel
 
-from chat.tools.skill_manager import _validate_skill_content
 from chat.utils.load_config import get_config_path
 
 from .common import (
@@ -12,24 +11,26 @@ from .common import (
     BadRequestError,
     MemoryType,
     UnprocessableContentError,
+    apply_edit_operations,
     extract_json_object,
     extract_skill_content,
     normalize_suggestions,
     normalize_user_instruct,
     validate_generated_content,
 )
-from .memory import apply_memory_edit_operations, build_memory_prompt
-from .skill import apply_skill_edit_operations, build_skill_prompt
-from .user_preference import (
-    apply_user_preference_edit_operations,
-    build_user_preference_prompt,
-)
+from .memory import build_memory_prompt
+from .skill import build_skill_full_content_prompt, build_skill_prompt
+from .user_preference import build_user_preference_prompt
 
 PROMPT_BUILDERS = {
     'skill': build_skill_prompt,
     'memory': build_memory_prompt,
     'user_preference': build_user_preference_prompt,
 }
+
+
+def _validate_raw_skill_content(raw: Any) -> str:
+    return validate_generated_content('skill', extract_skill_content(raw))
 
 
 def build_generate_prompt(
@@ -54,6 +55,36 @@ def build_generate_prompt(
 class MemoryGeneratePipeline:
     def __init__(self) -> None:
         self.llm = AutoModel(model='llm', config=get_config_path())
+
+    def _generate_full_skill_content(
+        self,
+        content: str,
+        suggestions: List[Dict[str, Any]],
+        user_instruct: Optional[str],
+        previous_error: str,
+    ) -> str:
+        prompt = build_skill_full_content_prompt(
+            content=content,
+            suggestions=suggestions,
+            user_instruct=user_instruct,
+            previous_error=previous_error,
+        )
+        raw = self.llm(prompt)
+        try:
+            parsed = extract_json_object(raw)
+            full_content = parsed.get('content')
+            if not isinstance(full_content, str):
+                raise UnprocessableContentError(
+                    "Full-content skill fallback must return string field 'content'."
+                )
+            return validate_generated_content('skill', full_content)
+        except UnprocessableContentError as exc:
+            try:
+                return _validate_raw_skill_content(raw)
+            except UnprocessableContentError as fallback_exc:
+                raise UnprocessableContentError(
+                    f'{exc}; raw skill fallback invalid: {fallback_exc}'
+                ) from fallback_exc
 
     def generate(
         self,
@@ -84,22 +115,44 @@ class MemoryGeneratePipeline:
             raw = self.llm(prompt)
             try:
                 parsed = extract_json_object(raw)
-                if memory_type == 'skill':
-                    edited_content = apply_skill_edit_operations(content, parsed)
-                    return validate_generated_content(memory_type, edited_content)
-                if memory_type == 'memory':
-                    edited_content = apply_memory_edit_operations(content, parsed)
-                    return validate_generated_content(memory_type, edited_content)
-                if memory_type == 'user_preference':
-                    edited_content = apply_user_preference_edit_operations(content, parsed)
-                    return validate_generated_content(memory_type, edited_content)
             except UnprocessableContentError as exc:
                 if memory_type == 'skill':
-                    skill_content = extract_skill_content(raw)
-                    validation_error = _validate_skill_content(skill_content)
-                    if validation_error is None:
-                        return skill_content
-                    error = f'{exc}; raw skill fallback invalid: {validation_error}'
+                    try:
+                        return _validate_raw_skill_content(raw)
+                    except UnprocessableContentError as fallback_exc:
+                        error = f'{exc}; raw skill fallback invalid: {fallback_exc}'
+                    try:
+                        return self._generate_full_skill_content(
+                            content=content,
+                            suggestions=normalized_suggestions,
+                            user_instruct=normalized_user_instruct,
+                            previous_error=error,
+                        )
+                    except UnprocessableContentError as full_content_exc:
+                        error = f'{error}; full content fallback invalid: {full_content_exc}'
+                    continue
+                error = str(exc)
+                continue
+
+            try:
+                edited_content = apply_edit_operations(
+                    content,
+                    parsed,
+                    entity_name=memory_type,
+                )
+                return validate_generated_content(memory_type, edited_content)
+            except UnprocessableContentError as exc:
+                if memory_type == 'skill':
+                    error = str(exc)
+                    try:
+                        return self._generate_full_skill_content(
+                            content=content,
+                            suggestions=normalized_suggestions,
+                            user_instruct=normalized_user_instruct,
+                            previous_error=error,
+                        )
+                    except UnprocessableContentError as full_content_exc:
+                        error = f'{error}; full content fallback invalid: {full_content_exc}'
                     continue
                 error = str(exc)
 

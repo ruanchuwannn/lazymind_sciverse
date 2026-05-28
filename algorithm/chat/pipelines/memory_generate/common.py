@@ -15,29 +15,12 @@ MemoryType = Literal['skill', 'memory', 'user_preference']
 
 MAX_GENERATE_ATTEMPTS = 3
 MAX_MANAGED_CONTENT_CHARS = 1400
+# Core rejects empty strings; U+200B renders as a blank added line in draft diff.
+EMPTY_DRAFT_PLACEHOLDER = '\u200b'
 
 _JSON_BLOCK_RE = re.compile(r'```json\s*(.*?)\s*```', re.DOTALL)
 _CODE_BLOCK_RE = re.compile(r'```(?:[a-zA-Z0-9_+-]+)?\s*(.*?)\s*```', re.DOTALL)
 _THINK_BLOCK_RE = re.compile(r'<think>.*?</think\s*>', re.DOTALL | re.IGNORECASE)
-_SINGLE_STRING_FIELD_RE = re.compile(
-    r'^\{\s*"(?P<key>[^"\\]+)"\s*:\s*"(?P<value>(?:[^"\\]|\\.)*)"\s*,?\s*\}\s*$',
-    re.DOTALL,
-)
-
-COMMON_OUTPUT_SPEC = (
-    'Output requirements:\n'
-    '1. Output only a JSON object; no markdown code blocks, no extra text.\n'
-    '2. JSON structure must be {"content": "<new complete text>"}.\n'
-    '3. content must be the final complete text after merging all valid input modification requests; do not provide only a patch.\n'  # noqa: E501
-)
-
-COMMON_LANGUAGE_RULES = (
-    '[Language]\n'
-    '- Determine the output language from the language used in current content, suggestions, and user_instruct.\n'
-    '- If the majority of the input is in Chinese (简体中文), write the generated content in Chinese.\n'
-    '- If the majority of the input is in English, write the generated content in English.\n'
-    '- Be consistent: do not mix languages within the generated content.\n'
-)
 
 
 class BadRequestError(ValueError):
@@ -126,12 +109,6 @@ def extract_json_object(raw: Any) -> Dict[str, Any]:
             pass
 
     if parsed is None:
-        for candidate in candidates:
-            parsed = extract_single_string_field_object(candidate)
-            if isinstance(parsed, dict):
-                break
-
-    if parsed is None:
         if last_error is not None:
             raise UnprocessableContentError(
                 f'Model output is not valid JSON: {last_error}'
@@ -141,32 +118,6 @@ def extract_json_object(raw: Any) -> Dict[str, Any]:
     if not isinstance(parsed, dict):
         raise UnprocessableContentError('Model output must be a JSON object.')
     return parsed
-
-
-def extract_single_string_field_object(text: str) -> Optional[Dict[str, str]]:
-    match = _SINGLE_STRING_FIELD_RE.match(text.strip())
-    if not match:
-        return None
-
-    key = match.group('key').strip()
-    raw_value = match.group('value').strip()
-    if raw_value.endswith(','):
-        raw_value = raw_value[:-1].rstrip()
-    if len(raw_value) < 2 or not raw_value.startswith('"') or not raw_value.endswith('"'):
-        return None
-
-    inner = raw_value[1:-1]
-    try:
-        value = json.loads(f'"{inner}"')
-    except json.JSONDecodeError:
-        value = (
-            inner.replace('\\"', '"')
-            .replace('\\\\', '\\')
-            .replace('\\r', '\r')
-            .replace('\\n', '\n')
-            .replace('\\t', '\t')
-        )
-    return {key: value}
 
 
 def extract_skill_content(raw: Any) -> str:
@@ -190,6 +141,9 @@ def validate_generated_content(memory_type: MemoryType, content: Any) -> str:
     if not isinstance(content, str):
         raise UnprocessableContentError("Generated field 'content' must be a string.")
 
+    if not content.strip() or content == EMPTY_DRAFT_PLACEHOLDER:
+        return EMPTY_DRAFT_PLACEHOLDER
+
     if memory_type == 'skill':
         validation_error = _validate_skill_content(content)
         if validation_error:
@@ -210,60 +164,6 @@ def validate_generated_content(memory_type: MemoryType, content: Any) -> str:
     return content
 
 
-def format_preservation_rules(entity: str) -> str:
-    return (
-        '[Content preservation rules (CRITICAL)]\n'
-        f'- You MUST preserve ALL existing {entity} that are NOT explicitly targeted by suggestions or user_instruct.\n'  # noqa: E501
-        f'- When a suggestion only affects one {entity}, keep all others IDENTICAL to the original (same wording, same order).\n'  # noqa: E501
-        '- Do NOT rephrase, reformat, or reorganize anything that is not being changed.\n'
-        '- If nothing in the current content needs to change for a particular part, copy it VERBATIM into your output.\n'  # noqa: E501
-        '- Only remove content that is explicitly marked as outdated by a suggestion, or explicitly contradicted by user_instruct.\n'  # noqa: E501
-    )
-
-
-def format_prompt_tail(
-    content: str,
-    suggestions: List[Dict[str, Any]],
-    user_instruct: Optional[str],
-    output_spec: str = COMMON_OUTPUT_SPEC,
-    previous_error: Optional[str] = None,
-) -> str:
-    return (
-        f'{format_retry_note(previous_error)}'
-        f'{format_inputs_block(content, suggestions, user_instruct)}'
-        f'{output_spec}'
-    )
-
-
-def format_inputs_block(
-    content: str,
-    suggestions: List[Dict[str, Any]],
-    user_instruct: Optional[str],
-) -> str:
-    sections = [
-        'Input information:\n'
-        '1) Current content (full old text):\n'
-        f'{content}\n\n'
-    ]
-
-    next_index = 2
-    if suggestions:
-        sections.append(
-            f'{next_index}) suggestions (JSON array; each item may contain an outdated field):\n'
-            '- outdated=TRUE means the suggestion is expired and for reference only; ignore if irrelevant to the current modification.\n'  # noqa: E501
-            '- outdated=FALSE or missing means the suggestion is still valid and content should be updated accordingly.\n'  # noqa: E501
-            f'{json.dumps(suggestions, ensure_ascii=False)}\n\n'
-        )
-        next_index += 1
-
-    if user_instruct:
-        sections.append(
-            f'{next_index}) user_instruct (direct user instruction):\n{user_instruct}\n\n'
-        )
-
-    return ''.join(sections)
-
-
 def normalize_user_instruct(raw_user_instruct: Any) -> Optional[str]:
     if raw_user_instruct is None:
         return None
@@ -274,65 +174,6 @@ def normalize_user_instruct(raw_user_instruct: Any) -> Optional[str]:
     return normalized or None
 
 
-def format_retry_note(previous_error: Optional[str]) -> str:
-    if not previous_error:
-        return ''
-    if 'replace_text could not find' in previous_error or "field 'old'" in previous_error:
-        return (
-            f'\nPrevious output was invalid, error: {previous_error}\n'
-            'Correction requirement: do not retry with any replace_text operation unless each old value is copied '
-            'verbatim from current content and can be found by exact plain string search. If you cannot guarantee '
-            'that, output full {"content": "..."} instead of operations.\n'
-        )
-    return f'\nPrevious output was invalid, error: {previous_error}\nPlease correct and regenerate.\n'
-
-
-def compact_len(text: Any) -> int:
-    return len(''.join(str(text).split()))
-
-
-def managed_content_governance_note(
-    content: str,
-    suggestions: List[Dict[str, Any]],
-    limit: int,
-) -> str:
-    suggestions_length = sum(
-        compact_len(item.get('title', ''))
-        + compact_len(item.get('content', ''))
-        + compact_len(item.get('reason', ''))
-        for item in suggestions
-    )
-    current_length = compact_len(content)
-    remaining = limit - current_length
-    return (
-        f'- Current content length after removing whitespace: {current_length} characters.\n'
-        f'- Suggestions total length after removing whitespace: {suggestions_length} characters.\n'
-        f'- Remaining budget before merging suggestions: {remaining} characters.\n'
-        '- Treat existing content as a bounded, continuously maintained store, not an append-only log.\n'  # noqa: E501
-        '- Outdated=TRUE is only one stale signal; also remove or rewrite existing content that is proven outdated, wrong, conflicting, redundant, overly specific, or low-value based on the new suggestions, user_instruct, or current context.\n'  # noqa: E501
-        '- Even when the limit is not exceeded, proactively compress, consolidate, or delete stale information instead of preserving it by default.\n'  # noqa: E501
-        '- Add new information only after resolving stale or conflicting old information; keep the final content concise and useful.\n'  # noqa: E501
-    )
-
-
-def normalize_string_list(raw: Any, *, field_name: str) -> List[str]:
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise UnprocessableContentError(f"Operation field '{field_name}' must be an array of strings.")
-
-    normalized: List[str] = []
-    for idx, item in enumerate(raw):
-        if not isinstance(item, str) or not item.strip():
-            raise UnprocessableContentError(
-                f"Operation field '{field_name}[{idx}]' must be a non-empty string."
-            )
-        value = item.strip()
-        if value not in normalized:
-            normalized.append(value)
-    return normalized
-
-
 def apply_replace_text(current: str, old: str, new: str, *, entity_name: str) -> str:
     if old not in current:
         raise UnprocessableContentError(
@@ -340,3 +181,111 @@ def apply_replace_text(current: str, old: str, new: str, *, entity_name: str) ->
             'Please correct the old text or use replace_all if necessary.'
         )
     return current.replace(old, new, 1)
+
+
+def apply_replace_text_operation(current: str, old: str, new: str, *, entity_name: str) -> str:
+    replacement = '' if not new.strip() else new
+    if not replacement:
+        lines = current.splitlines()
+        for idx, line in enumerate(lines):
+            if line == old:
+                return '\n'.join(lines[:idx] + lines[idx + 1:])
+    return apply_replace_text(current, old, replacement, entity_name=entity_name)
+
+
+def normalize_numbered_lists(content: str) -> str:
+    lines = content.splitlines()
+    normalized: List[str] = []
+    expected: Optional[int] = None
+    last_indent: Optional[str] = None
+    item_re = re.compile(r'^(\s*)(\d+)\.\s+(.*)$')
+
+    for line in lines:
+        match = item_re.match(line)
+        if not match:
+            normalized.append(line)
+            if line.strip():
+                expected = None
+                last_indent = None
+            continue
+
+        indent, number, body = match.groups()
+        if expected is None or indent != last_indent:
+            expected = int(number)
+            last_indent = indent
+        normalized.append(f'{indent}{expected}. {body}')
+        expected += 1
+
+    return '\n'.join(normalized)
+
+
+def parse_edit_operations(payload: Dict[str, Any], *, entity_name: str) -> List[Dict[str, Any]]:
+    if 'content' in payload and 'operations' not in payload:
+        content = payload.get('content')
+        if not isinstance(content, str):
+            raise UnprocessableContentError("Generated field 'content' must be a string.")
+        return [{'op': 'replace_all', 'content': content.strip()}]
+
+    operations = payload.get('operations')
+    if not isinstance(operations, list) or not operations:
+        raise UnprocessableContentError(
+            f"Model output for {entity_name} must contain a non-empty 'operations' array."
+        )
+
+    normalized_ops: List[Dict[str, Any]] = []
+    for idx, raw_op in enumerate(operations):
+        if not isinstance(raw_op, dict):
+            raise UnprocessableContentError(f"'operations[{idx}]' must be an object.")
+        op_name = str(raw_op.get('op') or '').strip()
+        if op_name == 'replace_all':
+            content = raw_op.get('content')
+            if not isinstance(content, str):
+                raise UnprocessableContentError("replace_all requires a string field 'content'.")
+            if len(operations) != 1:
+                raise UnprocessableContentError('replace_all must be the only operation when used.')
+            return [{'op': 'replace_all', 'content': content.strip()}]
+        if op_name == 'replace_text':
+            old = raw_op.get('old')
+            new = raw_op.get('new')
+            if not isinstance(old, str) or not old:
+                raise UnprocessableContentError("replace_text requires a non-empty string field 'old'.")
+            if not isinstance(new, str):
+                raise UnprocessableContentError("replace_text requires a string field 'new'.")
+            normalized_ops.append({
+                'op': 'replace_text',
+                'old': old,
+                'new': new,
+            })
+            continue
+        raise UnprocessableContentError(
+            f"Unsupported {entity_name} operation {op_name!r}; expected 'replace_text' or 'replace_all'."
+        )
+    return normalized_ops
+
+
+def apply_edit_operations(current_content: str, payload: Dict[str, Any], *, entity_name: str) -> str:
+    operations = parse_edit_operations(payload, entity_name=entity_name)
+    if operations[0]['op'] == 'replace_all':
+        return operations[0]['content']
+
+    current = current_content
+    applied_delete = False
+    for op in operations:
+        if op['old'] == op['new']:
+            continue
+        try:
+            current = apply_replace_text_operation(
+                current,
+                op['old'],
+                op['new'],
+                entity_name=entity_name,
+            )
+            if not op['new'].strip():
+                applied_delete = True
+        except UnprocessableContentError:
+            if not op['new'].strip():
+                continue
+            raise
+    if applied_delete:
+        current = normalize_numbered_lists(current)
+    return current.strip()
