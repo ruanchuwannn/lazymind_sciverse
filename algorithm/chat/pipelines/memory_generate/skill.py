@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 
 from .prompt_common import (
     COMMON_LANGUAGE_RULES,
-    COMMON_OUTPUT_SPEC,
     EDIT_OUTPUT_SPEC,
     format_preservation_rules,
     format_prompt_tail,
@@ -70,48 +69,4 @@ def build_skill_prompt(
         f'{managed_content_governance_note(content, suggestions, 2000)}'
         '\n'
         f'{format_prompt_tail(content, suggestions, user_instruct, EDIT_OUTPUT_SPEC, previous_error)}'
-    )
-
-
-def build_skill_full_content_prompt(
-    content: str,
-    suggestions: List[Dict[str, Any]],
-    user_instruct: Optional[str],
-    previous_error: Optional[str] = None,
-) -> str:
-    return (
-        'You are a SKILL.md editor. The previous JSON operations draft could not be applied. '
-        'Generate a full JSON content draft now; no explanations or summaries.\n'
-        'memory type: skill\n'
-        'SKILL.md is an abstract SOP (Standard Operating Procedure) that guides the agent to complete tasks '
-        'using a unified methodology when the description scope is satisfied.\n'
-        '\n'
-        '[Format requirements]\n'
-        '1. The content value must be a complete SKILL.md document.\n'
-        '2. It must start with YAML frontmatter containing at least name and description fields, '
-        'followed by a blank line, then the markdown body.\n'
-        '3. Keep the existing name value; do not rename unless user_instruct explicitly requests it.\n'
-        '4. description should describe the applicable scope and trigger conditions in one sentence; '
-        'this is the sole basis for routing/recalling this skill.\n'
-        '\n'
-        '[Fallback rules]\n'
-        '- Do not output operations. Output only {"content": "<complete final SKILL.md>"}.\n'
-        '- Apply only the exact target explicitly requested by each suggestion or user_instruct. Do not infer related cleanup in other sections.\n'  # noqa: E501
-        '- Preserve all existing frontmatter and body content that is not explicitly targeted.\n'
-        '- If a deletion target or quoted sentence from a suggestion is absent from current content, treat that deletion as already satisfied.\n'  # noqa: E501
-        '- If deleting or inserting numbered-list items, renumber the final list naturally in the complete content.\n'  # noqa: E501
-        '- When changes only affect methodology details in the body without changing the scope, keep description unchanged.\n'  # noqa: E501
-        '- When the requested change is only deleting or editing one body line, do NOT update frontmatter description, title, tags, version, author, created, or updated.\n'  # noqa: E501
-        '- The body must be an abstract SOP: steps, decision criteria, checklists, general rules, output format requirements, etc.\n'  # noqa: E501
-        '- Do not include specific cases, project names, specific data, conversation snippets, or one-time examples in the SKILL.md body.\n'  # noqa: E501
-        '\n'
-        f'{COMMON_LANGUAGE_RULES}'
-        '\n'
-        f'{format_preservation_rules("body content")}'
-        '\n'
-        '[Length control]\n'
-        '- Total length of SKILL.md (including frontmatter) must be within 2000 characters; keep it concise.\n'
-        f'{managed_content_governance_note(content, suggestions, 2000)}'
-        '\n'
-        f'{format_prompt_tail(content, suggestions, user_instruct, COMMON_OUTPUT_SPEC, previous_error)}'
     )

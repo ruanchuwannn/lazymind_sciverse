@@ -320,7 +320,7 @@ def test_skill_edit_operations_preserve_legacy_content_payload():
     )
 
 
-def test_skill_generate_falls_back_to_full_content_when_operations_old_missing():
+def test_skill_generate_retries_with_common_content_when_operations_old_missing():
     class FakeLLM:
         def __init__(self):
             self.prompts = []
@@ -368,8 +368,9 @@ def test_skill_generate_falls_back_to_full_content_when_operations_old_missing()
         '- Replacement'
     )
     assert len(fake_llm.prompts) == 2
-    assert 'Do not output operations' in fake_llm.prompts[1]
+    assert 'Previous output was invalid' in fake_llm.prompts[1]
     assert 'replace_text could not find' in fake_llm.prompts[1]
+    assert 'output full {"content": "..."} instead of operations' in fake_llm.prompts[1]
 
 
 def test_skill_edit_operations_skip_missing_delete_targets():
