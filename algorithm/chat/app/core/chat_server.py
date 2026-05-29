@@ -25,12 +25,14 @@ def create_app() -> FastAPI:
         model_features_routes,
         vocab_routes,
     )
+    from review import routes as review_routes
 
     app.include_router(health_routes.router)
     app.include_router(chat_routes.router)
     app.include_router(memory_generate_routes.router)
     app.include_router(model_check_routes.router)
     app.include_router(model_features_routes.router)
+    app.include_router(review_routes.router)
     app.include_router(vocab_routes.router)
     return app
 

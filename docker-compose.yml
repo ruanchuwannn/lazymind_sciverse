@@ -595,6 +595,7 @@ services:
       - ./data/core/uploads:/var/lib/lazymind/uploads
       - ./data/traces:/var/lib/lazymind/traces
       - ./algorithm/chat:/app/chat:ro
+      - ./algorithm/review:/app/review:ro
       - ./algorithm/common:/app/common:ro
       - ./algorithm/vocab:/app/vocab:ro
       - ./algorithm/parsing:/app/parsing:ro
@@ -649,12 +650,14 @@ services:
       - ./data/core/uploads:/var/lib/lazymind/uploads
       - ./data/traces:/var/lib/lazymind/traces
       - ./algorithm/chat:/app/chat:ro
+      - ./algorithm/review:/app/review:ro
       - ./algorithm/common:/app/common:ro
       - ./algorithm/vocab:/app/vocab:ro
       - ./algorithm/parsing:/app/parsing:ro
       - ./algorithm/processor:/app/processor:ro
       - ./algorithm/config.py:/app/config.py:ro
       - ./algorithm/chat:/app/algorithm/chat:ro
+      - ./algorithm/review:/app/algorithm/review:ro
       - ./algorithm/common:/app/algorithm/common:ro
       - ./algorithm/vocab:/app/algorithm/vocab:ro
       - ./algorithm/parsing:/app/algorithm/parsing:ro
