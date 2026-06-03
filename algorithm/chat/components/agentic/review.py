@@ -79,7 +79,7 @@ def _build_existing_state_context(config: dict, review_mode: str) -> str:
                 'You MUST read it carefully before deciding what to change.'
             )
             parts.append(
-                'When proposing updates, base the suggestions on this existing '
+                'When proposing updates, base the edit operations on this existing '
                 'content rather than replacing it wholesale. Retain still-valid '
                 'entries; add new entries; correct or remove only what is '
                 'outdated or wrong. Do NOT simply rewrite from scratch.'
@@ -87,7 +87,7 @@ def _build_existing_state_context(config: dict, review_mode: str) -> str:
             if memory_content:
                 parts.append(f'\n## Current agent working memory (target=memory)\n{memory_content}')
             if user_pref_content:
-                parts.append(f'\n## Current user_preference (target=user)\n{user_pref_content}')
+                parts.append(f'\n## Current user_preference (target=user_preference)\n{user_pref_content}')
             parts.append('--- END EXISTING STATE ---\n')
 
     return '\n'.join(parts)

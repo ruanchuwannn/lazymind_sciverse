@@ -13,36 +13,65 @@ def test_core_api_endpoint_uses_internal_core_base_url():
     )
 
 
-def test_memory_submits_core_api_suggestion_paths(monkeypatch):
+def test_memory_writes_review_rows_after_applying_operations(monkeypatch):
     calls = []
 
-    def fake_post_core_api(path, payload):
-        calls.append((path, payload))
-        return {'persisted': 'core_api', 'url': f'http://core{path}'}
+    def fake_insert_memory_review_record(**kwargs):
+        calls.append(kwargs)
+        return {
+            'id': f'review-{len(calls)}',
+            'review_status': 'pending',
+        }
 
     monkeypatch.setattr(
         memory_mod,
         '_agentic_config',
-        lambda: {'session_id': 'sid-1', 'core_api_url': 'http://10.119.24.129:9090'},
+        lambda: {
+            'session_id': 'sid-1',
+            'memory': '2026-06-01: Existing memory.',
+            'user_preference': 'Prefers concise answers.',
+        },
     )
-    monkeypatch.setattr(memory_mod, '_post_core_api', fake_post_core_api)
+    monkeypatch.setattr(
+        memory_mod,
+        'insert_memory_review_record',
+        fake_insert_memory_review_record,
+    )
 
-    suggestions = [
-        {
-            'title': 'Keep replies concise',
-            'content': 'The user consistently prefers concise answers.',
-            'reason': 'Observed across the session.',
-        }
-    ]
+    memory_ops = [{
+        'op': 'replace_text',
+        'old': '2026-06-01: Existing memory.',
+        'new': '2026-06-01: Existing memory.\n2026-06-02: New memory.',
+    }]
+    preference_ops = [{
+        'op': 'replace_text',
+        'old': 'Prefers concise answers.',
+        'new': 'Prefers concise Chinese answers.',
+    }]
 
-    memory_result = memory_mod.memory('memory', suggestions)
-    user_result = memory_mod.memory('user', suggestions)
+    memory_result = memory_mod.memory('memory', memory_ops)
+    user_result = memory_mod.memory('user_preference', preference_ops)
 
     assert memory_result['success'] is True
     assert user_result['success'] is True
+    assert user_result['result']['target'] == 'user_preference'
+    assert memory_result['result']['persisted'] == 'memory_review'
+    assert user_result['result']['persisted'] == 'memory_review'
     assert calls == [
-        ('/memory/suggestion', {'session_id': 'sid-1', 'suggestions': suggestions}),
-        ('/user_preference/suggestion', {'session_id': 'sid-1', 'suggestions': suggestions}),
+        {
+            'target': 'memory',
+            'session_id': 'sid-1',
+            'source_content': '2026-06-01: Existing memory.',
+            'content': '2026-06-01: Existing memory.\n2026-06-02: New memory.',
+            'operations': memory_ops,
+        },
+        {
+            'target': 'user_preference',
+            'session_id': 'sid-1',
+            'source_content': 'Prefers concise answers.',
+            'content': 'Prefers concise Chinese answers.',
+            'operations': preference_ops,
+        },
     ]
 
 
@@ -52,7 +81,7 @@ def test_memory_requires_session_id(monkeypatch):
 
     result = memory_mod.memory(
         'memory',
-        [{'title': 'Remember this', 'content': 'Store as a durable suggestion.'}],
+        [{'op': 'replace_all', 'content': 'Store as durable memory.'}],
     )
 
     assert result == {
@@ -61,17 +90,14 @@ def test_memory_requires_session_id(monkeypatch):
     }
 
 
-def test_memory_rejects_too_many_suggestions(monkeypatch):
+def test_memory_rejects_empty_operations(monkeypatch):
     monkeypatch.setattr(memory_mod, '_agentic_config', lambda: {'session_id': 'sid-1'})
 
-    result = memory_mod.memory(
-        'memory',
-        [{'title': f'item-{i}', 'content': 'x'} for i in range(6)],
-    )
+    result = memory_mod.memory('memory', [])
 
     assert result == {
         'success': False,
-        'reason': 'At most 5 suggestions are allowed per call; got 6.',
+        'reason': "'operations' must be a non-empty list.",
     }
 
 

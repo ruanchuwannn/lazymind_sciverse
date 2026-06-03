@@ -819,7 +819,7 @@ def test_tool_stream_frame_treats_string_parameter_errors_as_failed():
     assert 'updated successfully' not in preview
 
 
-def test_tool_stream_frame_uses_memory_suggestion_title_preview_value():
+def test_tool_stream_frame_uses_memory_operation_preview_value():
     frame = agentic._format_tool_stream_frame({
         'round': 1,
         'content': '',
@@ -828,11 +828,10 @@ def test_tool_stream_frame_uses_memory_suggestion_title_preview_value():
             'id': 'toolcall-memory-1',
             'name': 'memory',
             'arguments': {
-                'target': 'user',
-                'suggestions': [{
-                    'title': 'Language preference',
+                'target': 'user_preference',
+                'operations': [{
+                    'op': 'replace_all',
                     'content': 'The user prefers Chinese responses.',
-                    'reason': 'The user explicitly asked to use Chinese.',
                 }],
             },
         }],
@@ -841,9 +840,8 @@ def test_tool_stream_frame_uses_memory_suggestion_title_preview_value():
     assert frame['think'] is None
     assert frame['sources'] == []
     preview = frame['text'].split('</tp>', 1)[0]
-    assert 'Saving **Language preference** as useful long term memory now.' in preview
+    assert 'Saving **replace_all** as useful long term memory now.' in preview
     assert 'The user prefers Chinese responses.' not in preview
-    assert 'The user explicitly asked to use Chinese.' not in preview
     assert '<tool_call>{"id":"toolcall-memory-1","name":"memory"' in frame['text']
 
 
@@ -856,18 +854,16 @@ def test_tool_stream_frame_repairs_stringified_memory_arguments_preview_value():
             'id': 'toolcall-memory-string-1',
             'name': 'memory',
             'arguments': (
-                '{"target": "memory", "suggestions": [{"title": "System status", '
-                '"content": "All tools are functional and ready for use.", '
-                '"reason": "Initial system validation"]}'
+                '{"target": "memory", "operations": [{"op": "replace_all", '
+                '"content": "All tools are functional and ready for use."}]}'
             ),
         }],
     })
 
     preview = frame['text'].split('</tp>', 1)[0]
-    assert 'System status' in preview
+    assert 'replace_all' in preview
     assert 'All tools are functional and ready for use.' not in preview
-    assert 'Initial system validation' not in preview
-    assert '"arguments":{"target":"memory","suggestions":[{"title":"System status","content":"All tools are functional and ready for use.","reason":"Initial system validation"}]}' in frame['text']
+    assert '"arguments":{"target":"memory","operations":[{"op":"replace_all","content":"All tools are functional and ready for use."}]}' in frame['text']
 
 
 def test_tool_stream_frame_uses_skill_category_and_name_preview_value():

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from typing import Any, Dict, Iterable, List, Literal, Optional
+from typing import Any, Dict, Iterable, List, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -31,17 +31,7 @@ class SessionReviewRequest(BaseModel):
     )
     current_content: str = Field(
         default='',
-        description='Current full memory or user_preference text, used only as reference',
-    )
-    max_suggestions: int = Field(
-        default=5,
-        ge=1,
-        le=5,
-        description='Maximum suggestions to return',
-    )
-    environment_context: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description='Optional time/user environment context',
+        description='Current full memory or user_preference text to edit',
     )
 
     @model_validator(mode='after')
@@ -108,8 +98,8 @@ def _is_successful_memory_tool_result(result: Any) -> bool:
 
     payload = result.get('result')
     if isinstance(payload, dict):
-        return payload.get('persisted') == 'core_api'
-    return result.get('persisted') == 'core_api'
+        return payload.get('persisted') in {'core_api', 'memory_review'}
+    return result.get('persisted') in {'core_api', 'memory_review'}
 
 
 def _memory_tool_submitted(agent_state: Dict[str, Any]) -> bool:
@@ -130,19 +120,17 @@ def build_session_review_prompt(
     *,
     target: ReviewTarget,
     current_content: str,
-    max_suggestions: int,
-    environment_context: Dict[str, Any] | None,
 ) -> str:
     if target == 'memory':
         target_instruction = (
             "This backend-triggered review is ONLY for agent working memory. "
-            "If saving is warranted, call memory(target='memory', suggestions=[...]). "
-            "Do not call memory with target='user'."
+            "If saving is warranted, call memory(target='memory', operations=[...]). "
+            "Do not call memory with target='user_preference'."
         )
     else:
         target_instruction = (
             "This backend-triggered review is ONLY for user_preference. "
-            "If saving is warranted, call memory(target='user', suggestions=[...]). "
+            "If saving is warranted, call memory(target='user_preference', operations=[...]). "
             "Do not call memory with target='memory'."
         )
 
@@ -151,20 +139,39 @@ def build_session_review_prompt(
         if target == 'memory'
         else 'Current user_preference'
     )
-    env_context = environment_context or {}
     return (
         f'{_MEMORY_REVIEW_PROMPT}\n\n'
         '# Backend-triggered target constraint\n'
         f'{target_instruction}\n'
-        f'Return at most {max_suggestions} suggestions in the memory tool call.\n\n'
-        '--- EXISTING STATE ---\n'
+        'For this endpoint, do not call skill_manage, get_skill, vocab_manage, '
+        'or any tool except memory. Do not output suggestions.\n\n'
+        'Do NOT save multi-step reusable workflows, troubleshooting procedures, '
+        'lessons learned, tool usage patterns, implementation recipes, SOPs, '
+        'or general task conventions as memory or user_preference. Those belong '
+        'in skills, but this endpoint must only submit memory edit operations.\n\n'
+        '# Required memory edit operation output\n'
+        'When a durable update is warranted, output exactly one memory tool call '
+        'with an operations array. Supported operations are:\n'
+        '- replace_text: {"op": "replace_text", "old": "...", "new": "..."}; '
+        "'old' MUST be an exact substring copied from the current content.\n"
+        '- replace_all: {"op": "replace_all", "content": "..."}; use this '
+        'only when current content is empty, or when the update truly requires '
+        'rewriting the full target text.\n'
+        'Prefer replace_text whenever current content is non-empty. For adding '
+        'a new entry to existing content, replace the smallest exact existing '
+        'section or block with the same block plus the new entry. Do not use '
+        'replace_all merely because you are adding one item. Use replace_all '
+        'only if no exact substring can safely anchor the edit, or the content '
+        'needs global deduplication/conflict resolution/reorganization.\n'
+        'The operations are applied to the current content below, and the edited '
+        'full text is written to the memory_review table for human review. '
+        'If no durable update is warranted, do not call memory; reply with '
+        '`Nothing to save` and a brief reason.\n\n'
+        '--- CURRENT CONTENT ---\n'
         f'## {existing_label}\n{current_content or ""}\n'
-        '--- END EXISTING STATE ---\n\n'
-        '--- BACKEND REVIEW CONTEXT ---\n'
-        f'Environment context: {env_context!r}\n'
+        '--- END CURRENT CONTENT ---\n\n'
         'The conversation to review is provided as llm_chat_history by the caller. '
-        'Use that history as the source of truth.\n'
-        '--- END BACKEND REVIEW CONTEXT ---'
+        'Use that history as the source of truth.'
     )
 
 
@@ -180,13 +187,12 @@ def review_session(request: SessionReviewRequest) -> SessionReviewResult:
     prompt = build_session_review_prompt(
         target=request.target,
         current_content=request.current_content,
-        max_suggestions=request.max_suggestions,
-        environment_context=request.environment_context,
     )
 
     config = {
         'session_id': request.session_id,
         'core_api_url': _cfg['core_api_url'],
+        'current_content': request.current_content,
     }
     if request.target == 'memory':
         config['memory'] = request.current_content

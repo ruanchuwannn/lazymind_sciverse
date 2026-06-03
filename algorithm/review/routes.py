@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from uuid import uuid4
 
 from fastapi import APIRouter
@@ -21,16 +21,15 @@ class SessionReviewPayload(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     session_id: str = Field(..., description='Backend session ID')
+    target: ReviewTarget = Field(..., description='Review target: memory or user_preference')
     history: List[ChatMessage] = Field(
         default_factory=list,
         description='Chat history passed by backend for review',
     )
     current_content: str = Field(
         default='',
-        description='Current full target content, used to avoid duplicate suggestions',
+        description='Current full target content to edit',
     )
-    max_suggestions: int = Field(default=5, ge=1, le=5)
-    environment_context: Optional[Dict[str, Any]] = None
     llm_config: Dict[str, Any] = Field(
         ...,
         description='Required per-request model configuration loaded by core for the current user',
@@ -75,16 +74,15 @@ def _init_review_session(
     inject_model_config(model_config)
 
 
-def _run_review(target: ReviewTarget, payload: SessionReviewPayload):
+def _run_review(payload: SessionReviewPayload):
     try:
+        target = payload.target
         _init_review_session(payload.session_id, target, payload.llm_config)
         request = SessionReviewRequest(
             target=target,
             session_id=payload.session_id,
             history=payload.history,
             current_content=payload.current_content,
-            max_suggestions=payload.max_suggestions,
-            environment_context=payload.environment_context,
         )
         result = review_session(request)
         return _ok(result.model_dump())
@@ -95,16 +93,8 @@ def _run_review(target: ReviewTarget, payload: SessionReviewPayload):
 
 
 @router.post(
-    '/api/chat/memory/review',
-    summary='Review backend-provided history for memory suggestions',
+    '/api/chat/memory_review',
+    summary='Review backend-provided history for memory or user_preference edits',
 )
-async def review_memory(payload: SessionReviewPayload):
-    return _run_review('memory', payload)
-
-
-@router.post(
-    '/api/chat/user_preference/review',
-    summary='Review backend-provided history for user_preference suggestions',
-)
-async def review_user_preference(payload: SessionReviewPayload):
-    return _run_review('user_preference', payload)
+async def memory_review(payload: SessionReviewPayload):
+    return _run_review(payload)

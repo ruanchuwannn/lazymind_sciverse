@@ -2,12 +2,17 @@ from functools import wraps
 from typing import Any, Dict, List, Literal, Optional
 
 import lazyllm
-import requests
 from lazyllm import fc_register
 from typing_extensions import TypedDict
 
+from chat.pipelines.memory_generate.common import (
+    UnprocessableContentError,
+    apply_edit_operations,
+    reject_unchanged_content,
+    validate_generated_content,
+)
+from review.memory_review_db import insert_memory_review_record
 
-MAX_SUGGESTIONS_PER_CALL = 5
 DEFAULT_CORE_API_TIMEOUT = 30
 
 
@@ -53,6 +58,8 @@ def _session_id(agentic_config: Optional[Dict[str, Any]] = None) -> str:
 
 
 def _post_core_api(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    import requests
+
     config = _agentic_config()
     url = _core_api_endpoint(path, config)
     timeout = config.get('core_api_timeout', DEFAULT_CORE_API_TIMEOUT)
@@ -84,55 +91,65 @@ def _post_core_api(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-class Suggestion(TypedDict, total=False):
-    """Natural-language edit suggestion shared by skill / memory / user_preference.
+class EditOperation(TypedDict, total=False):
+    """JSON edit operation applied to the current memory or user_preference text.
 
     Fields:
-        title (str, required): short label summarising the proposed change.
-        content (str, required): natural-language description of the
-            modification; the downstream reviewer applies it.
-        reason (str, optional): why the change is worth making.
+        op (str, required): either ``replace_text`` or ``replace_all``.
+        old (str, required for replace_text): exact substring to replace.
+        new (str, required for replace_text): replacement text.
+        content (str, required for replace_all): full replacement content.
     """
 
-    title: str
+    op: str
+    old: str
+    new: str
     content: str
-    reason: str
+
+
+MemoryTarget = Literal['memory', 'user_preference']
+
+
+def _current_content_for_target(agentic_config: Dict[str, Any], target: str) -> str:
+    value = agentic_config.get(target)
+    if isinstance(value, str):
+        return value
+    fallback = agentic_config.get('current_content')
+    if isinstance(fallback, str):
+        return fallback
+    return ''
 
 
 @fc_register('tool', execute_in_sandbox=False)
 @_handle_tool_errors
 def memory(
-    target: Literal['memory', 'user'],
-    suggestions: List[Suggestion],
+    target: MemoryTarget,
+    operations: List[EditOperation],
 ) -> Dict[str, Any]:
-    """Record natural-language edit suggestions for the user's
-    memory (``target='memory'``) or user profile / preference
-    (``target='user'``).
+    """Apply edit operations to memory or user_preference and submit a review row.
 
-    Call this tool when, while handling the current query, you learn
-    something that should persist across future sessions, but it must still
-    go through the review and draft-confirmation workflow before becoming the
-    final stored text.
-
-    Each call accepts a batch of at most 5 suggestions; every suggestion
-    describes ONE proposed change in natural language and will be reviewed
-    before being merged. For ``target='memory'``, suggestions should describe
-    atomic memory events or updates, not the final merged memory text.
+    Call this tool only after comparing the conversation with the current full
+    target text. The tool applies the supplied JSON edit operations to that
+    original text, validates the edited full text, and writes one pending row to
+    the algorithm-side ``memory_review`` table. It returns status metadata only;
+    it does not return the edited content.
 
     Args:
-        target: Which buffer the suggestions belong to. ``'memory'`` is the
+        target: Which buffer the edit operations belong to. ``'memory'`` is the
             agent's own working memory about the user's ongoing context and
-            prior discussions; ``'user'`` is the user
-            profile / preference text.
-        suggestions: Ordered list of suggestions (max 5 per call). Each
-            item is a dict with the following fields:
+            prior discussions; ``'user_preference'`` is the user profile /
+            preference text.
+        operations: Ordered JSON edit operations. Supported operations:
 
-            - ``title`` (str, required): short label summarising the change.
-            - ``content`` (str, required): natural-language description of
-              the modification. For ``target='memory'``, this should usually
-              be one timestamped memory event, one same-day update, or one
-              correction to an existing memory thread.
-            - ``reason`` (str, optional): rationale for the change.
+            - ``{"op": "replace_text", "old": "...", "new": "..."}``:
+              replace the first exact ``old`` substring with ``new``. Prefer
+              this whenever the current content is non-empty, including when
+              adding a new entry to an existing section.
+            - ``{"op": "replace_all", "content": "..."}``: replace the
+              full original target text with ``content``. Use this only when
+              the current content is empty, no exact substring can safely
+              anchor the edit, or the update needs global deduplication,
+              conflict resolution, or broader reorganization.
     """
     def _ok(result: Dict[str, Any]) -> Dict[str, Any]:
         return {'success': True, 'result': result}
@@ -140,41 +157,52 @@ def memory(
     def _fail(reason: str) -> Dict[str, Any]:
         return {'success': False, 'reason': reason}
 
-    if target not in {'memory', 'user'}:
+    tool_target = str(target).strip()
+    if tool_target not in {'memory', 'user_preference'}:
         return _fail(
-            f"Unknown target {target!r}; expected one of 'memory', 'user'."
+            f"Unknown target {target!r}; expected one of 'memory', 'user_preference'."
         )
-    if not suggestions:
-        return _fail("'suggestions' must be a non-empty list.")
-    if len(suggestions) > MAX_SUGGESTIONS_PER_CALL:
-        return _fail(
-            f'At most {MAX_SUGGESTIONS_PER_CALL} suggestions are allowed per '
-            f'call; got {len(suggestions)}.'
-        )
+    if not operations:
+        return _fail("'operations' must be a non-empty list.")
 
     agentic_config = _agentic_config()
     session_id = _session_id(agentic_config)
     if not session_id:
         return _fail("'session_id' is required in agentic_config.")
 
-    endpoint = (
-        '/memory/suggestion'
-        if target == 'memory'
-        else '/user_preference/suggestion'
-    )
-    payload = {
-        'session_id': session_id,
-        'suggestions': [dict(s) for s in suggestions],
-    }
+    current_content = _current_content_for_target(agentic_config, tool_target)
+    operation_payload = [dict(op) for op in operations]
+    try:
+        edited_content = apply_edit_operations(
+            current_content,
+            {'operations': operation_payload},
+            entity_name=tool_target,
+        )
+        edited_content = reject_unchanged_content(
+            tool_target,
+            current_content,
+            edited_content,
+        )
+        edited_content = validate_generated_content(tool_target, edited_content)
+    except UnprocessableContentError as exc:
+        return _fail(str(exc))
 
     result: Dict[str, Any] = {
-        'target': target,
-        'appended_suggestions': len(suggestions),
+        'target': tool_target,
+        'status': 'success',
+        'operation_count': len(operation_payload),
     }
-    try:
-        result.update(_post_core_api(endpoint, payload))
-    except (requests.RequestException, RuntimeError) as exc:
-        lazyllm.LOG.error(f'Failed to submit memory suggestions: {exc}')
-        return _fail(f'Failed to submit memory suggestions: {exc}')
+    record = insert_memory_review_record(
+        target=tool_target,
+        session_id=session_id,
+        source_content=current_content,
+        content=edited_content,
+        operations=operation_payload,
+    )
+    result.update({
+        'persisted': 'memory_review',
+        'record_id': record.get('id'),
+        'review_status': record.get('review_status', 'pending'),
+    })
 
     return _ok(result)

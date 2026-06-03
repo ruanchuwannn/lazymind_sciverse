@@ -19,12 +19,14 @@ def test_memory_review_prompt_excludes_preferences_and_workflows():
     prompt = build_session_review_prompt(
         target='memory',
         current_content='',
-        max_suggestions=3,
-        environment_context={'time': {'now': '2026-05-28'}},
     )
 
     assert 'ONLY for agent working memory' in prompt
     assert "memory(target='memory'" in prompt
+    assert 'operations' in prompt
+    assert 'Prefer replace_text whenever current content is non-empty' in prompt
+    assert 'Do not output suggestions' in prompt
+    assert 'Environment context' not in prompt
     assert 'Do NOT save multi-step reusable workflows' in prompt
     assert 'reusable workflows' in prompt
 
@@ -35,12 +37,10 @@ def test_user_preference_review_prompt_excludes_session_history():
     prompt = build_session_review_prompt(
         target='user_preference',
         current_content='',
-        max_suggestions=3,
-        environment_context=None,
     )
 
     assert 'ONLY for user_preference' in prompt
-    assert "memory(target='user'" in prompt
+    assert "memory(target='user_preference'" in prompt
     assert "Do not call memory with target='memory'" in prompt
 
 
@@ -67,7 +67,7 @@ def test_review_session_runs_agent_with_memory_tool(monkeypatch):
                         'function': {'name': 'memory'},
                         'tool_call_result': {
                             'success': True,
-                            'result': {'persisted': 'core_api'},
+                            'result': {'persisted': 'memory_review'},
                         },
                     }
                 ],
@@ -165,7 +165,7 @@ def test_memory_tool_submission_can_be_read_from_tool_history():
                     'name': 'memory',
                     'content': (
                         "{'success': True, "
-                        "'result': {'persisted': 'core_api'}}"
+                        "'result': {'persisted': 'memory_review'}}"
                     ),
                 }
             ]

@@ -21,7 +21,7 @@ _REPRESENTATIVE_TOOL_ARGUMENTS: dict[str, str] = {
     'url_fetch': 'url',
     'arxiv_search': 'query',
     'sciverse_search': 'query',
-    'memory': 'suggestions.title',
+    'memory': 'operations.op',
     'vocab_manage': 'suggestions.word <-> suggestions.synonym',
     'vision_extractor': 'url',
     'skill_manage': 'category/name',

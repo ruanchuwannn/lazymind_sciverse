@@ -12,13 +12,20 @@ def test_kb_tool_returns_error_result_for_invalid_arguments():
 
 
 def test_memory_tool_returns_error_result_for_unexpected_exception(monkeypatch):
-    def raise_unexpected(_path, _payload):
+    def raise_unexpected(**_kwargs):
         raise ValueError('backend payload is invalid')
 
-    monkeypatch.setattr(memory_mod, '_agentic_config', lambda: {'session_id': 'sid-1'})
-    monkeypatch.setattr(memory_mod, '_post_core_api', raise_unexpected)
+    monkeypatch.setattr(
+        memory_mod,
+        '_agentic_config',
+        lambda: {'session_id': 'sid-1', 'memory': 'old'},
+    )
+    monkeypatch.setattr(memory_mod, 'insert_memory_review_record', raise_unexpected)
 
-    result = memory_mod.memory('memory', [{'title': 'pref', 'content': 'Remember the preference.'}])
+    result = memory_mod.memory(
+        'memory',
+        [{'op': 'replace_all', 'content': 'new'}],
+    )
 
     assert result['success'] is False
     assert result['error_type'] == 'ValueError'
